@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 FROM node:24-bookworm-slim AS web
 RUN corepack enable
 WORKDIR /src
