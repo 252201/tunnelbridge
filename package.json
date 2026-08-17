@@ -1,0 +1,12 @@
+{
+  "name": "tunnelbridge",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "dev:desktop": "pnpm --filter @tunnelbridge/desktop dev",
+    "dev:admin": "pnpm --filter @tunnelbridge/admin dev",
+    "build:web": "pnpm -r --filter './web/**' build",
+    "typecheck": "pnpm -r --filter './web/**' typecheck",
+    "test:web": "pnpm -r --filter './web/**' test"
+  }
+}

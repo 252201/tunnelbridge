@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TunnelBridge",
+  "version": "0.1.0",
+  "identifier": "dev.tunnelbridge.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ../../web/desktop dev",
+    "beforeBuildCommand": "pnpm --dir ../../web/desktop build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../../web/desktop/dist"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "TunnelBridge",
+      "width": 1180,
+      "height": 760,
+      "minWidth": 900,
+      "minHeight": 640,
+      "center": true,
+      "titleBarStyle": "Overlay",
+      "hiddenTitle": true
+    }],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "category": "DeveloperTool",
+    "shortDescription": "Secure TCP tunnels from your Mac",
+    "longDescription": "TunnelBridge connects local TCP services to a self-hosted public relay.",
+    "createUpdaterArtifacts": true,
+    "macOS": { "minimumSystemVersion": "13.0" }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/252201/tunnelbridge/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVCODVGMjA3RjhBOTdFNEEKUldSS2ZxbjRCL0tGNjR5Z3NmaTVWQlVaNlNlenhwU3VnS2ZsLzYzNXAzU3FFK1htUmNzbkV0WlAK"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+services:
+  tunnelbridge:
+    image: ghcr.io/${GITHUB_OWNER:-your-account}/tunnelbridge-server:${TB_VERSION:-latest}
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      TB_ADMIN_PASSWORD: ${TB_ADMIN_PASSWORD:?Set TB_ADMIN_PASSWORD to at least 12 characters}
+      TB_SECURE_COOKIES: "true"
+      TB_PORT_START: ${TB_PORT_START:-20000}
+      TB_PORT_END: ${TB_PORT_END:-20100}
+      TB_AUDIT_RETENTION_DAYS: ${TB_AUDIT_RETENTION_DAYS:-30}
+      RUST_LOG: ${RUST_LOG:-tunnelbridge_server=info}
+    volumes:
+      - tunnelbridge-data:/app/data
+    ports:
+      - "${TB_PORT_START:-20000}-${TB_PORT_END:-20100}:${TB_PORT_START:-20000}-${TB_PORT_END:-20100}"
+    networks: [tunnelbridge]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      tunnelbridge:
+        condition: service_healthy
+    environment:
+      TB_DOMAIN: ${TB_DOMAIN:?Set TB_DOMAIN to the relay domain}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [tunnelbridge]
+
+networks:
+  tunnelbridge:
+
+volumes:
+  tunnelbridge-data:
+  caddy-data:
+  caddy-config:

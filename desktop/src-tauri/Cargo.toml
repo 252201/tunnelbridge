@@ -1,0 +1,39 @@
+[package]
+name = "tunnelbridge-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tunnelbridge_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "tunnelbridge-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+http.workspace = true
+keyring = { version = "3.6", features = ["apple-native"] }
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-autostart = "2.5"
+tauri-plugin-opener = "2.5"
+tauri-plugin-updater = "2.10"
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util = "0.7"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tunnelbridge-protocol = { path = "../../crates/protocol" }
+url.workspace = true
+uuid.workspace = true
