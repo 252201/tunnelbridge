@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.tunnelbridge.desktop",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../../web/desktop dev",
-    "beforeBuildCommand": "pnpm --dir ../../web/desktop build",
+    "beforeDevCommand": "pnpm --dir ../web/desktop dev",
+    "beforeBuildCommand": "pnpm --dir ../web/desktop build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../../web/desktop/dist"
   },

@@ -9,7 +9,7 @@ TunnelBridge 是一套面向个人开发者的自托管 TCP 内网穿透工具�
 - TCP 映射、IPv4/IPv6 CIDR 白名单、显式公开访问和局域网目标确认。
 - 单管理员 Web 控制台、设备令牌、隧道状态、活动连接、指标和审计记录。
 - Docker Compose + Caddy 自动 HTTPS，GHCR 多架构镜像发布配置。
-- Universal macOS DMG、Developer ID 公证和 Tauri 签名更新工作流。
+- Universal macOS DMG、ad-hoc 签名和 Tauri 签名更新工作流。
 
 ## 仓库结构
 
@@ -89,15 +89,18 @@ Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中�
 | `TB_AUDIT_RETENTION_DAYS` | `30` | 审计日志保留天数 |
 | `TB_SECURE_COOKIES` | `true` | 仅本地 HTTP 开发可关闭 |
 
-## 发布准备
+## macOS 发布
 
-在正式发布前必须完成两项一次性配置：
+GitHub Actions 在推送 `v*` 标签时构建 Universal DMG，并发布服务端多架构镜像。当前发布采用 macOS ad-hoc 签名，不需要付费 Apple Developer Program：
 
-1. 将 `desktop/src-tauri/tauri.conf.json` 中的更新地址替换成真实 GitHub 仓库，并写入由 `tauri signer generate` 创建的公钥。
-2. 在 GitHub Actions Secrets 中配置：
-   `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID`、`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+- Tauri 更新地址已指向本仓库，更新公钥保存在 `desktop/src-tauri/tauri.conf.json`。
+- GitHub Actions 只需配置 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+- 更新私钥必须与应用中的公钥匹配，且绝不能提交到仓库。
+- ad-hoc 签名不代表 Apple 已验证开发者，也不能进行 Apple 公证。
 
-Apple 证书使用 base64 编码的 `.p12` 内容。Tauri 私钥必须与配置中的公钥匹配，且绝不能提交到仓库。
+首次安装从浏览器下载的版本时，macOS 会阻止未公证应用。将应用移入“应用程序”并尝试打开一次，然后进入“系统设置 → 隐私与安全性”，确认来源确实是本仓库后选择“仍要打开”。后续版本仍通过 Tauri 独立签名校验更新包完整性。
+
+如果以后加入 Apple Developer Program，可重新配置 Developer ID Application 证书及公证凭据，以移除首次安装的手动放行步骤。
 
 ## 验证
 
