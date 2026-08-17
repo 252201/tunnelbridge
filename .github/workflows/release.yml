@@ -44,32 +44,29 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Import Developer ID certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p runner "$RUNNER_TEMP/build.keychain"
-          security default-keychain -s "$RUNNER_TEMP/build.keychain"
-          security unlock-keychain -p runner "$RUNNER_TEMP/build.keychain"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$RUNNER_TEMP/build.keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k runner "$RUNNER_TEMP/build.keychain"
-      - name: Build, sign, notarize and publish universal app
+      - name: Build and publish ad-hoc signed universal app
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # `-` is Apple's ad-hoc identity. It does not require a Developer ID
+          # certificate and deliberately skips notarization.
+          APPLE_SIGNING_IDENTITY: "-"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop/src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: TunnelBridge ${{ github.ref_name }}
-          releaseBody: See the assets below to download and install TunnelBridge.
+          releaseBody: |
+            This macOS build is ad-hoc signed and is not notarized by Apple.
+
+            On first launch, move TunnelBridge to Applications and try to open it.
+            Then open System Settings > Privacy & Security and choose Open Anyway.
+
+            Download releases only from this repository. Automatic update artifacts
+            are independently signed with the TunnelBridge updater key.
           releaseDraft: false
           prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           args: --target universal-apple-darwin
