@@ -9,4 +9,5 @@
 *.tsbuildinfo
 .env
 .DS_Store
+Cloudflare令牌和vps公钥:私钥/
 src-tauri/gen

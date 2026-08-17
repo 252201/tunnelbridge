@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: write
 
 jobs:
   server-image:
@@ -28,6 +29,10 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/tunnelbridge-server:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/tunnelbridge-server:latest
+          # Persist BuildKit layers between releases. This is especially useful
+          # for the Rust dependency layer when the arm64 QEMU build runs again.
+          cache-from: type=gha,scope=tunnelbridge-server
+          cache-to: type=gha,mode=max,scope=tunnelbridge-server
 
   macos-app:
     runs-on: macos-15

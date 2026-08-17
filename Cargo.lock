@@ -5473,7 +5473,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5501,7 +5501,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "ipnet",
@@ -5512,7 +5512,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",

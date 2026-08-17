@@ -50,6 +50,37 @@ pnpm dlx @tauri-apps/cli@latest dev --config desktop/src-tauri/tauri.conf.json
 
 ## VPS 部署
 
+### 交互式一键部署
+
+仓库提供了一个不会上传密钥、可重复执行的部署脚本。它会通过 SSH 检查 Docker，自动拉取 GHCR 镜像、创建/更新 Cloudflare DNS A 记录、初始化 SQLite，并配置 HTTPS 入口。VPS 上已有可用 Nginx 时会备份并复用它；没有 Nginx 且 80/443 空闲时会启动 Caddy。
+
+本机需要 `curl`、`jq` 或 `python3`、`ssh`、`openssl` 和 `ssh-keygen`。VPS 需要 Linux、Docker、免密码 `sudo`，并在安全组放行 SSH、80、443 及 TCP 映射端口池：
+
+```bash
+chmod +x scripts/deploy-server.sh
+./scripts/deploy-server.sh
+```
+
+脚本会交互询问 VPS IPv4、SSH 私钥、Cloudflare API Token、域名、镜像版本、TCP 端口池、ACME 邮箱和管理员密码。管理员密码留空时自动生成高熵密码，只在终端最后显示一次；首次初始化后会从容器环境中移除。已有数据库不会重置管理员密码。可以先用以下命令检查输入和部署计划，完全不会连接 VPS 或调用 Cloudflare API：
+
+```bash
+./scripts/deploy-server.sh --dry-run
+```
+
+也可以用环境变量预填非敏感参数，例如：
+
+```bash
+TB_VPS_IP=217.142.230.244 \
+TB_SSH_USER=ubuntu \
+TB_SSH_KEY="$HOME/.ssh/id_ed25519" \
+TB_DOMAIN=tunnelbridge.example.com \
+./scripts/deploy-server.sh
+```
+
+Cloudflare 记录始终设置为 DNS-only。Cloudflare 橙云代理不能转发任意 TCP 映射端口；部署完成后请确认域名解析到 VPS，并在云安全组放行脚本配置的端口范围。脚本只把部署命令和应用配置通过 SSH 发送到 VPS，不会把 Cloudflare Token 或 SSH 私钥写入仓库或远程磁盘。
+
+### 手动 Docker Compose（可选）
+
 1. 将域名 A/AAAA 记录指向 VPS，并在防火墙放行 `80`、`443` 和配置的 TCP 映射端口范围。
 2. 复制环境变量并设置强密码：
 

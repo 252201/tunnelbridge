@@ -26,6 +26,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build:web
+      - run: bash -n scripts/deploy-server.sh
       - run: cargo fmt --all --check
       - run: cargo clippy -p tunnelbridge-protocol -p tunnelbridge-server --all-targets -- -D warnings
       - run: cargo test -p tunnelbridge-protocol -p tunnelbridge-server

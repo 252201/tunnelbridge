@@ -70,12 +70,7 @@ impl RuntimeState {
         let message = message.into();
         *self.status.write().await = (status, message.clone());
         if let Some(tray) = self.app.tray_by_id("main") {
-            let symbol = match status {
-                AgentStatus::Online => "●",
-                AgentStatus::Connecting => "◌",
-                AgentStatus::Offline | AgentStatus::Error => "×",
-                AgentStatus::Unconfigured => "○",
-            };
+            let symbol = tray_status_symbol(status);
             let _ = tray.set_title(Some(symbol));
             let _ = tray.set_tooltip(Some(format!("TunnelBridge — {message}")));
         }
@@ -103,5 +98,28 @@ impl RuntimeState {
             metrics: self.metrics.read().await.clone(),
             events: self.events.read().await.iter().cloned().collect(),
         }
+    }
+}
+
+fn tray_status_symbol(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Online => "🟢",
+        AgentStatus::Connecting => "🟡",
+        AgentStatus::Offline | AgentStatus::Error => "🔴",
+        AgentStatus::Unconfigured => "⚪",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentStatus, tray_status_symbol};
+
+    #[test]
+    fn tray_status_uses_colored_state_dots() {
+        assert_eq!(tray_status_symbol(AgentStatus::Online), "🟢");
+        assert_eq!(tray_status_symbol(AgentStatus::Connecting), "🟡");
+        assert_eq!(tray_status_symbol(AgentStatus::Offline), "🔴");
+        assert_eq!(tray_status_symbol(AgentStatus::Error), "🔴");
+        assert_eq!(tray_status_symbol(AgentStatus::Unconfigured), "⚪");
     }
 }
