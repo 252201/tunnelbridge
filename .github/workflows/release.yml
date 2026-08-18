@@ -64,6 +64,7 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import os
           import re
+          from textwrap import dedent
           from pathlib import Path
 
           tag = os.environ["RELEASE_TAG"]
@@ -78,7 +79,7 @@ jobs:
           if next_section:
               section = section[:len(marker) + next_section.start()]
 
-          install_note = """
+          install_note = dedent("""
           ---
 
           ## macOS 安装说明
@@ -86,7 +87,7 @@ jobs:
           本版本 macOS 应用使用 ad-hoc 签名，未经过 Apple 公证。首次启动时请将 TunnelBridge 移入“应用程序”，尝试打开后前往“系统设置 > 隐私与安全性”，选择“仍要打开”。
 
           仅从本仓库下载发行版。自动更新资产使用 TunnelBridge 更新密钥独立签名。
-          """.strip()
+          """).strip()
           body = section.strip() + "\n\n" + install_note
           print("body<<__TUNNELBRIDGE_RELEASE_BODY__")
           print(body)
