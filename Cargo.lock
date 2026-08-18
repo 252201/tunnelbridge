@@ -5718,7 +5718,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5755,7 +5755,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "ipnet",
@@ -5766,7 +5766,7 @@ dependencies = [
 
 [[package]]
 name = "tunnelbridge-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "argon2",

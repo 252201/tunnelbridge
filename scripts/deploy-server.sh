@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly IMAGE_REPOSITORY="ghcr.io/252201/tunnelbridge-server"
-readonly DEFAULT_VERSION="v0.2.1"
+readonly DEFAULT_VERSION="v0.2.2"
 readonly DEFAULT_SSH_PORT="22"
 readonly DEFAULT_SSH_USER="ubuntu"
 readonly DEFAULT_PORT_START="20000"
@@ -62,7 +62,7 @@ usage() {
   TB_SSH_KEY            SSH 私钥路径
   CLOUDFLARE_API_TOKEN  Cloudflare API Token
   TB_DOMAIN             公网域名
-  TB_VERSION            镜像标签，默认 v0.2.1
+  TB_VERSION            镜像标签，默认 v0.2.2
   TB_PORT_START         TCP/UDP 端口池起始值，默认 20000
   TB_PORT_END           TCP/UDP 端口池结束值，默认 20100
   TB_QUIC_PORT          QUIC 公网 UDP 端口，默认 443

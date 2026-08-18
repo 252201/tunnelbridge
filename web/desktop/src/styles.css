@@ -104,7 +104,7 @@ h1 em { font-style: normal; color: #899289; }
 .view-heading h1 { margin: 7px 0 10px; font-size: 52px; }
 .view-heading > div > p:last-child { color: var(--muted); margin: 0; }
 .tunnel-table { overflow: hidden; }
-.table-head, .tunnel-row { display: grid; grid-template-columns: minmax(210px, 1.2fr) minmax(160px, 1fr) minmax(120px, .75fr) minmax(130px, .8fr) 100px; align-items: center; column-gap: 14px; }
+.table-head, .tunnel-row { display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(145px, .9fr) minmax(0, 1.45fr) minmax(112px, .8fr) 92px; align-items: center; column-gap: 14px; }
 .table-head { min-height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); color: #667068; font: 10px "IBM Plex Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .tunnel-row { min-height: 72px; padding: 0 20px; border-bottom: 1px solid var(--line); }
 .tunnel-row:last-child { border-bottom: 0; }
@@ -117,17 +117,21 @@ h1 em { font-style: normal; color: #899289; }
 .tunnel-dot.online { background: var(--green); box-shadow: 0 0 8px rgba(185,242,39,.5); }
 .tunnel-dot.starting { background: var(--amber); }
 .tunnel-dot.error, .tunnel-dot.agent_offline { background: var(--danger); }
+.tunnel-row > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tunnel-row code { color: #abb3aa; font: 12px "IBM Plex Mono", monospace; }
-.public-port { color: var(--cyan) !important; display: flex; align-items: center; gap: 7px; }
-.policy { justify-self: start; padding: 5px 8px; border: 1px solid rgba(95,226,209,.14); color: var(--cyan); border-radius: 5px; font-size: 11px; }
+.public-port { min-width: 0; max-width: 100%; color: var(--cyan) !important; display: flex; align-items: center; gap: 7px; }
+.endpoint-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.public-port svg { flex: 0 0 auto; }
+.policy { justify-self: start; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border: 1px solid rgba(95,226,209,.14); color: var(--cyan); border-radius: 5px; font-size: 11px; }
 .policy.public { color: var(--amber); border-color: rgba(246,185,87,.18); }
 .row-actions { display: flex; align-items: center; justify-content: end; gap: 8px; }
 .switch { width: 39px; height: 22px; padding: 2px; border-radius: 12px; background: #282e29; border: 1px solid #3a423b; cursor: pointer; transition: .2s; }
 .switch span { display: block; width: 16px; height: 16px; background: #828b82; border-radius: 50%; transition: .2s; }
 .switch.on { background: rgba(185,242,39,.18); border-color: rgba(185,242,39,.45); }
 .switch.on span { background: var(--green); transform: translateX(16px); }
-.ghost-danger { opacity: .5; border: 0; background: transparent; }
+.ghost-danger { opacity: .72; border: 0; background: transparent; }
 .ghost-danger:hover { opacity: 1; color: var(--danger); }
+.ghost-danger:disabled { opacity: .3; cursor: wait; }
 .large-empty { min-height: 360px; display: grid; place-items: center; align-content: center; text-align: center; }
 .large-empty > svg { width: 34px; height: 34px; color: #566057; margin-bottom: 18px; }
 .large-empty h2 { margin-bottom: 7px; }
@@ -184,6 +188,19 @@ fieldset { border: 0; padding: 0; margin: 27px 0 0; display: grid; grid-template
 .mode-card { text-align: left; display: flex; gap: 10px; padding: 14px; color: #9fa89f; background: #171b18; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }.mode-card svg { width: 20px; color: var(--cyan); }.mode-card span { display: grid; gap: 4px; }.mode-card small { color: #646c65; }.mode-card.selected { border-color: var(--cyan); background: rgba(95,226,209,.06); }.mode-card.danger svg { color: var(--amber); }.mode-card.danger.selected { border-color: var(--amber); background: rgba(246,185,87,.06); }
 .confirm { grid-template-columns: 18px 1fr; align-items: start; padding: 13px; border-radius: 8px; background: rgba(95,226,209,.05); border: 1px solid rgba(95,226,209,.15); }.confirm input { width: 15px; margin: 2px 0; }.confirm span { display: grid; gap: 3px; color: #6f7870; }.confirm strong { color: #bac2ba; }.confirm.danger { background: rgba(246,185,87,.05); border-color: rgba(246,185,87,.18); }
 .drawer-footer { display: flex; justify-content: end; gap: 10px; margin-top: 30px; border-top: 1px solid var(--line); padding-top: 20px; }
+.delete-backdrop { z-index: 300; }
+.delete-card { width: min(440px, calc(100vw - 40px)); padding: 30px; border: 1px solid rgba(255,107,94,.24); border-radius: 14px; background: #171a17; box-shadow: 0 35px 100px #020302; }
+.delete-icon { width: 46px; height: 46px; display: grid; place-items: center; margin-bottom: 22px; border: 1px solid rgba(255,107,94,.3); border-radius: 10px; color: var(--danger); background: rgba(255,107,94,.08); }
+.delete-icon svg { width: 21px; }
+.delete-card h2 { margin: 7px 0 10px; font-size: 26px; font-weight: 500; }
+.delete-copy { color: var(--muted); line-height: 1.6; font-size: 13px; margin-bottom: 18px; }
+.delete-target { display: grid; gap: 6px; min-width: 0; padding: 12px 13px; border: 1px solid var(--line); border-radius: 8px; background: #101310; }
+.delete-target strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.delete-target code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cyan); font: 11px "IBM Plex Mono", monospace; }
+.delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.danger-button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 1px solid rgba(255,107,94,.35); border-radius: 8px; background: rgba(255,107,94,.14); color: #ffd8d2; font-weight: 600; cursor: pointer; }
+.danger-button:hover { border-color: rgba(255,107,94,.65); background: rgba(255,107,94,.22); }
+.danger-button:disabled, .secondary:disabled { opacity: .45; cursor: wait; }
 .toast { position: fixed; z-index: 200; left: 50%; bottom: 28px; transform: translateX(-50%); display: flex; gap: 18px; align-items: center; min-width: 330px; max-width: 600px; padding: 13px 13px 13px 17px; border: 1px solid rgba(246,185,87,.25); background: #211d14; border-radius: 9px; box-shadow: 0 15px 50px #020302; color: #e7d6b8; font-size: 13px; }.toast button { margin-left: auto; border: 0; background: none; color: inherit; cursor: pointer; }.toast svg { width: 16px; }
 
 @keyframes enter { from { opacity: 0; transform: translateY(9px); } }

@@ -90,6 +90,8 @@ function App() {
   const [showCreate, setShowCreate] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Tunnel | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!isTauri()) {
@@ -141,12 +143,24 @@ function App() {
     } catch (error) { setNotice(String(error)); }
   }
 
-  async function removeTunnel(tunnel: Tunnel) {
-    if (!window.confirm(`删除隧道“${tunnel.name}”？公网端点 ${publicEndpoint(tunnel)} 将被释放。`)) return;
+  function requestRemove(tunnel: Tunnel) {
+    if (!deletingId) setPendingDelete(tunnel);
+  }
+
+  async function confirmRemove() {
+    const tunnel = pendingDelete;
+    if (!tunnel || deletingId) return;
+    setDeletingId(tunnel.id);
     try {
       await command("delete_tunnel", { id: tunnel.id });
       await refresh();
-    } catch (error) { setNotice(String(error)); }
+      setPendingDelete(null);
+      setNotice(`隧道“${tunnel.name}”已删除，公网端点已释放`);
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -177,7 +191,7 @@ function App() {
             <Overview snapshot={snapshot} onlineCount={onlineCount} onOpenTunnels={() => setView("tunnels")} />
           )}
           {view === "tunnels" && (
-            <TunnelView tunnels={snapshot.tunnels} onCreate={() => setShowCreate(true)} onToggle={toggleTunnel} onDelete={removeTunnel} />
+            <TunnelView tunnels={snapshot.tunnels} deletingId={deletingId} onCreate={() => setShowCreate(true)} onToggle={toggleTunnel} onDelete={requestRemove} />
           )}
           {view === "activity" && <ActivityView snapshot={snapshot} />}
           {view === "settings" && <SettingsView snapshot={snapshot} onReconnect={() => setShowConnect(true)} onNotice={setNotice} />}
@@ -186,6 +200,7 @@ function App() {
 
       {showCreate && <TunnelEditor onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} onNotice={setNotice} />}
       {showConnect && <ConnectPanel configured={snapshot.configured} serverUrl={snapshot.server_url ?? ""} onClose={() => snapshot.configured && setShowConnect(false)} onConnected={async () => { setShowConnect(false); await refresh(); }} onNotice={setNotice} />}
+      {pendingDelete && <DeleteDialog tunnel={pendingDelete} busy={deletingId === pendingDelete.id} onCancel={() => { if (!deletingId) setPendingDelete(null); }} onConfirm={() => void confirmRemove()} />}
       {notice && <div className="toast" role="alert"><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭"><X /></button></div>}
     </div>
   );
@@ -237,24 +252,45 @@ function Metric({ label, value, note }: { label: string; value: string; note: st
   return <div className="metric"><span>{label}</span><strong>{value}</strong><code>{note}</code></div>;
 }
 
-function TunnelView({ tunnels, onCreate, onToggle, onDelete }: { tunnels: Tunnel[]; onCreate: () => void; onToggle: (t: Tunnel) => void; onDelete: (t: Tunnel) => void }) {
+function TunnelView({ tunnels, deletingId, onCreate, onToggle, onDelete }: { tunnels: Tunnel[]; deletingId: string | null; onCreate: () => void; onToggle: (t: Tunnel) => void; onDelete: (t: Tunnel) => void }) {
   return <div className="view enter">
     <div className="view-heading"><div><p className="section-index">02 / TCP TUNNELS</p><h1>隧道</h1><p>每个公网端口对应一个仅由本机访问的服务。</p></div><button className="primary" onClick={onCreate}><Plus /> 创建映射</button></div>
     <div className="tunnel-table panel">
       <div className="table-head"><span>状态 / 名称</span><span>本地目标</span><span>公网端点</span><span>访问策略</span><span /></div>
-      {tunnels.length === 0 ? <div className="large-empty"><Cable /><h2>尚无隧道</h2><p>创建第一条 TCP 映射，把 SSH、数据库或本地开发服务接入公网。</p><button className="secondary" onClick={onCreate}><Plus /> 创建第一条</button></div> : tunnels.map((tunnel) => <TunnelRow key={tunnel.id} tunnel={tunnel} onToggle={onToggle} onDelete={onDelete} />)}
+      {tunnels.length === 0 ? <div className="large-empty"><Cable /><h2>尚无隧道</h2><p>创建第一条 TCP 映射，把 SSH、数据库或本地开发服务接入公网。</p><button className="secondary" onClick={onCreate}><Plus /> 创建第一条</button></div> : tunnels.map((tunnel) => <TunnelRow key={tunnel.id} tunnel={tunnel} deleting={deletingId === tunnel.id} onToggle={onToggle} onDelete={onDelete} />)}
     </div>
   </div>;
 }
 
-function TunnelRow({ tunnel, compact, onToggle, onDelete }: { tunnel: Tunnel; compact?: boolean; onToggle?: (t: Tunnel) => void; onDelete?: (t: Tunnel) => void }) {
+function TunnelRow({ tunnel, compact, deleting, onToggle, onDelete }: { tunnel: Tunnel; compact?: boolean; deleting?: boolean; onToggle?: (t: Tunnel) => void; onDelete?: (t: Tunnel) => void }) {
   const stateLabel = ({ online: "运行中", stopped: "已停止", starting: "启动中", agent_offline: "设备离线", error: "端口异常" })[tunnel.status];
   return <div className={`tunnel-row ${compact ? "compact" : ""}`}>
     <div className="tunnel-name"><span className={`tunnel-dot ${tunnel.status}`} /><div><strong>{tunnel.name}</strong><small>{stateLabel}</small></div></div>
-    <code>{tunnel.local_host}:{tunnel.local_port}</code>
-    <code className="public-port">{publicEndpoint(tunnel)}<Copy size={13} /></code>
+    <code className="local-target" title={`${tunnel.local_host}:${tunnel.local_port}`}>{tunnel.local_host}:{tunnel.local_port}</code>
+    <code className="public-port" title={publicEndpoint(tunnel)}><span className="endpoint-label">{publicEndpoint(tunnel)}</span><Copy size={13} /></code>
     {!compact && <span className={`policy ${tunnel.access_mode}`}>{tunnel.access_mode === "allowlist" ? `${tunnel.allowed_cidrs.length} 条白名单` : "公开访问"}</span>}
-    {!compact && <div className="row-actions"><button className={`switch ${tunnel.enabled ? "on" : ""}`} role="switch" aria-checked={tunnel.enabled} onClick={() => onToggle?.(tunnel)}><span /></button><button className="ghost-danger" onClick={() => onDelete?.(tunnel)} aria-label={`删除 ${tunnel.name}`}><Trash2 /></button></div>}
+    {!compact && <div className="row-actions"><button type="button" className={`switch ${tunnel.enabled ? "on" : ""}`} role="switch" aria-checked={tunnel.enabled} onClick={() => onToggle?.(tunnel)}><span /></button><button type="button" className="ghost-danger" disabled={deleting} onClick={() => onDelete?.(tunnel)} aria-label={`删除 ${tunnel.name}`}><Trash2 /></button></div>}
+  </div>;
+}
+
+function DeleteDialog({ tunnel, busy, onCancel, onConfirm }: { tunnel: Tunnel; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) onCancel();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  return <div className="modal-backdrop delete-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+    <section className="delete-card" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
+      <div className="delete-icon"><Trash2 /></div>
+      <p className="section-index">REMOVE ROUTE</p>
+      <h2 id="delete-title">删除这条隧道？</h2>
+      <p id="delete-description" className="delete-copy">删除后公网端点会立即释放，本地服务不会被停止。</p>
+      <div className="delete-target"><strong>{tunnel.name}</strong><code title={publicEndpoint(tunnel)}>{publicEndpoint(tunnel)}</code></div>
+      <div className="delete-actions"><button type="button" className="secondary" onClick={onCancel} disabled={busy}>取消</button><button type="button" className="danger-button" onClick={onConfirm} disabled={busy}>{busy ? <RefreshCw className="spin" /> : <Trash2 />}{busy ? "正在删除…" : "删除隧道"}</button></div>
+    </section>
   </div>;
 }
 
@@ -301,7 +337,7 @@ function SettingsView({ snapshot, onReconnect, onNotice }: { snapshot: AppSnapsh
       <div className="panel settings-card"><Server /><div><h2>中继服务器</h2><p>{snapshot.server_url ?? "尚未配置"}</p><small>设备令牌已存入 macOS 钥匙串，不会显示在界面中。</small></div><button className="secondary" onClick={onReconnect}>{snapshot.configured ? "重新配置" : "连接"}</button></div>
       <div className="panel settings-card"><Network /><div><h2>承载协议</h2><p>当前：{snapshot.active_transport?.toUpperCase() ?? "未连接"}</p><small>{snapshot.transport_fallback_reason ?? "自动模式优先 QUIC，失败后回退 WSS；KCP 需手动选择。"}</small></div><select value={snapshot.transport_mode ?? "auto"} onChange={(e)=>void changeTransport(e.target.value as TransportMode)}><option value="auto">自动</option><option value="quic">QUIC</option><option value="kcp">KCP</option><option value="wss">WSS</option></select></div>
       <div className="panel settings-card"><Power /><div><h2>登录时启动</h2><p>开机后在菜单栏运行 TunnelBridge</p><small>默认关闭，隧道只会在应用运行时保持连接。</small></div><button className={`switch ${autostart ? "on" : ""}`} role="switch" aria-checked={autostart} onClick={toggleAutostart}><span /></button></div>
-      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.1</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
+      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.2</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
     </div>
   </div>;
 }
