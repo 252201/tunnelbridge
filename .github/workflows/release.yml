@@ -55,6 +55,43 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Prepare release notes
+        id: release-notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          marker = f"## [{tag}]"
+          start = changelog.find(marker)
+          if start < 0:
+              raise SystemExit(f"No changelog section found for {tag}")
+
+          section = changelog[start:]
+          next_section = re.search(r"^## \[", section[len(marker):], re.MULTILINE)
+          if next_section:
+              section = section[:len(marker) + next_section.start()]
+
+          install_note = """
+          ---
+
+          ## macOS 安装说明
+
+          本版本 macOS 应用使用 ad-hoc 签名，未经过 Apple 公证。首次启动时请将 TunnelBridge 移入“应用程序”，尝试打开后前往“系统设置 > 隐私与安全性”，选择“仍要打开”。
+
+          仅从本仓库下载发行版。自动更新资产使用 TunnelBridge 更新密钥独立签名。
+          """.strip()
+          body = section.strip() + "\n\n" + install_note
+          print("body<<__TUNNELBRIDGE_RELEASE_BODY__")
+          print(body)
+          print("__TUNNELBRIDGE_RELEASE_BODY__")
+          PY
       - name: Build and publish ad-hoc signed universal app
         uses: tauri-apps/tauri-action@v1
         env:
@@ -68,14 +105,7 @@ jobs:
           projectPath: desktop/src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: TunnelBridge ${{ github.ref_name }}
-          releaseBody: |
-            This macOS build is ad-hoc signed and is not notarized by Apple.
-
-            On first launch, move TunnelBridge to Applications and try to open it.
-            Then open System Settings > Privacy & Security and choose Open Anyway.
-
-            Download releases only from this repository. Automatic update artifacts
-            are independently signed with the TunnelBridge updater key.
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true
