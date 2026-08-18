@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tunnelbridge_protocol::{ActiveConnection, AgentControlMessage, MetricsSnapshot};
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::{config::Config, geoip::GeoIpResolver};
 
 pub type SharedState = Arc<AppState>;
 
@@ -28,10 +28,12 @@ pub struct AppState {
     pub listeners: DashMap<Uuid, CancellationToken>,
     pub active: DashMap<Uuid, ActiveConnection>,
     pub counters: Counters,
+    pub geoip: GeoIpResolver,
 }
 
 impl AppState {
     pub fn new(config: Config, db: SqlitePool) -> SharedState {
+        let geoip = GeoIpResolver::new(config.geoip_url.clone());
         Arc::new(Self {
             config,
             db,
@@ -42,6 +44,7 @@ impl AppState {
             listeners: DashMap::new(),
             active: DashMap::new(),
             counters: Counters::default(),
+            geoip,
         })
     }
 

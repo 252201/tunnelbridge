@@ -134,6 +134,7 @@ async fn accept_public_connection(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         anyhow::bail!("agent is offline");
     };
+    let peer_location = state.geoip.lookup(peer.ip()).await;
     let connection_id = Uuid::new_v4();
     let ticket = random_secret(32);
     let (socket_tx, socket_rx) = oneshot::channel();
@@ -155,6 +156,7 @@ async fn accept_public_connection(
             connection_id,
             tunnel: tunnel.clone(),
             peer_addr: peer.to_string(),
+            peer_location: peer_location.clone(),
             ticket,
             expires_at,
         })
@@ -174,6 +176,7 @@ async fn accept_public_connection(
         id: connection_id,
         tunnel_id: tunnel.id,
         peer_addr: peer.to_string(),
+        peer_location,
         opened_at: Utc::now(),
         bytes_up: 0,
         bytes_down: 0,

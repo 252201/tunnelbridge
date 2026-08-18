@@ -34,6 +34,7 @@ ENV TB_LISTEN_ADDR=0.0.0.0:8080 \
     TB_ADMIN_DIST=/app/admin \
     TB_PORT_START=20000 \
     TB_PORT_END=20100 \
+    TB_GEOIP_URL=https://ipwho.is/{ip} \
     RUST_LOG=tunnelbridge_server=info
 EXPOSE 8080 20000-20100
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD curl -fsS http://127.0.0.1:8080/readyz || exit 1

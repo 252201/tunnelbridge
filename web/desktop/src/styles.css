@@ -149,6 +149,10 @@ h1 em { font-style: normal; color: #899289; }
 .event > span { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
 .event > span.warn { background: var(--amber); }.event > span.error { background: var(--danger); }
 .event p { margin: 0; color: #b1b8b0; font-size: 13px; }
+.event-copy { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.source-location { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid rgba(95,226,209,.2); border-radius: 999px; color: #d7e5dc; background: rgba(95,226,209,.06); font: 10px "IBM Plex Mono", monospace; white-space: nowrap; }
+.source-location > span:first-child { font-size: 14px; line-height: 1; }
+.source-location.unknown { border-color: rgba(119,128,120,.24); color: #778078; background: rgba(119,128,120,.06); }
 .event-empty { color: #606861; height: 120px; display: grid; place-items: center; }
 
 .settings-grid { display: grid; gap: 14px; }

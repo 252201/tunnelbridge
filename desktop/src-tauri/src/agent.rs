@@ -133,12 +133,16 @@ async fn run_control(
                             AgentControlMessage::ConfigSync { tunnels } => {
                                 *state.tunnels.write().await = tunnels;
                             }
-                            AgentControlMessage::OpenConnection { connection_id, tunnel, peer_addr, ticket, .. } => {
+                            AgentControlMessage::OpenConnection { connection_id, tunnel, peer_addr, peer_location, ticket, .. } => {
                                 let state = state.clone();
                                 let config = config.clone();
                                 let token = token.to_owned();
                                 tauri::async_runtime::spawn(async move {
-                                    state.log("info", format!("{} 收到来自 {peer_addr} 的连接", tunnel.name)).await;
+                                    state.log_with_location(
+                                        "info",
+                                        format!("{} 收到来自 {peer_addr} 的连接", tunnel.name),
+                                        peer_location,
+                                    ).await;
                                     {
                                         let mut metrics = state.metrics.write().await;
                                         metrics.active_connections += 1;

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tunnelbridge_protocol::{MetricsSnapshot, Tunnel};
+use tunnelbridge_protocol::{GeoLocation, MetricsSnapshot, Tunnel};
 
 use crate::config::AgentConfig;
 
@@ -24,6 +24,8 @@ pub struct EventEntry {
     pub at: DateTime<Utc>,
     pub level: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_location: Option<GeoLocation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,11 +79,21 @@ impl RuntimeState {
     }
 
     pub async fn log(&self, level: &str, message: impl Into<String>) {
+        self.log_with_location(level, message, None).await;
+    }
+
+    pub async fn log_with_location(
+        &self,
+        level: &str,
+        message: impl Into<String>,
+        peer_location: Option<GeoLocation>,
+    ) {
         let mut entries = self.events.write().await;
         entries.push_front(EventEntry {
             at: Utc::now(),
             level: level.into(),
             message: message.into(),
+            peer_location,
         });
         entries.truncate(200);
     }

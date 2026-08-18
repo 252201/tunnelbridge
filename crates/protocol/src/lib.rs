@@ -40,6 +40,12 @@ pub struct Tunnel {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GeoLocation {
+    pub country_code: String,
+    pub country_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTunnelRequest {
     pub name: String,
@@ -93,6 +99,8 @@ pub enum AgentControlMessage {
         connection_id: Uuid,
         tunnel: Tunnel,
         peer_addr: String,
+        #[serde(default)]
+        peer_location: Option<GeoLocation>,
         ticket: String,
         expires_at: DateTime<Utc>,
     },
@@ -161,6 +169,8 @@ pub struct ActiveConnection {
     pub id: Uuid,
     pub tunnel_id: Uuid,
     pub peer_addr: String,
+    #[serde(default)]
+    pub peer_location: Option<GeoLocation>,
     pub opened_at: DateTime<Utc>,
     pub bytes_up: u64,
     pub bytes_down: u64,

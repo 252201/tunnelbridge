@@ -54,10 +54,16 @@ export interface DeviceTokenResponse {
   created_at: string;
 }
 
+export interface GeoLocation {
+  country_code: string;
+  country_name: string;
+}
+
 export interface ActiveConnection {
   id: string;
   tunnel_id: string;
   peer_addr: string;
+  peer_location?: GeoLocation | null;
   opened_at: string;
   bytes_up: number;
   bytes_down: number;

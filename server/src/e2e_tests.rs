@@ -232,6 +232,7 @@ fn test_config(database: PathBuf, port: u16) -> Config {
         session_ttl: Duration::from_secs(60),
         audit_retention_days: 30,
         secure_cookies: false,
+        geoip_url: "off".into(),
     }
 }
 

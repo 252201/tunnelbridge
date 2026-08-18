@@ -101,6 +101,7 @@ Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中�
 - 设备令牌为高熵随机值，服务端仅保存 BLAKE3 哈希；桌面端仅保存在 Keychain。
 - 管理密码使用 Argon2id；管理会话使用 HttpOnly、Secure、SameSite=Strict Cookie 和 CSRF Token。
 - 每个 TCP 会话使用 15 秒有效、一次消费的数据票据。票据和设备令牌不会写入应用日志。
+- 开启 GeoIP 时，服务端会把允许连接的来源 IP 查询到 `TB_GEOIP_URL`，仅在内存缓存国家结果，不额外保存 GeoIP 查询记录；对隐私有要求时将其设为 `off`。
 - TunnelBridge 不检查或记录转发载荷。SSH、数据库等目标协议仍应启用自身身份认证和加密。
 
 生产环境应定期备份 `tunnelbridge-data` 卷，并用主机防火墙再次约束映射端口来源。撤销设备后，已有控制连接会被断开，新数据通道将无法通过认证。
@@ -112,6 +113,7 @@ Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中�
 | `TB_LISTEN_ADDR` | `0.0.0.0:8080` | 管理/API 服务监听地址 |
 | `TB_DATABASE_URL` | `sqlite://data/tunnelbridge.db?mode=rwc` | SQLite 地址 |
 | `TB_ADMIN_PASSWORD` | 无 | 首次启动必填，至少 12 字符 |
+| `TB_GEOIP_URL` | `https://ipwho.is/{ip}` | 来源 IP 国家解析地址；设为 `off` 可关闭 |
 | `TB_PORT_START` / `TB_PORT_END` | `20000` / `20100` | 公网 TCP 端口池 |
 | `TB_TICKET_TTL_SECONDS` | `15` | 数据票据有效期 |
 | `TB_CONNECT_TIMEOUT_SECONDS` | `15` | 等待代理数据通道时间 |

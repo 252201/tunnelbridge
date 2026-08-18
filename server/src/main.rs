@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod error;
 mod gateway;
+mod geoip;
 mod state;
 mod tunnels;
 

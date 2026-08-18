@@ -16,6 +16,7 @@ pub struct Config {
     pub session_ttl: Duration,
     pub audit_retention_days: i64,
     pub secure_cookies: bool,
+    pub geoip_url: String,
 }
 
 impl Config {
@@ -46,6 +47,7 @@ impl Config {
             session_ttl: Duration::from_secs(parse_env("TB_SESSION_TTL_SECONDS", 43_200)?),
             audit_retention_days: parse_env("TB_AUDIT_RETENTION_DAYS", 30)?,
             secure_cookies: env::var("TB_SECURE_COOKIES").map_or(true, |v| v != "false"),
+            geoip_url: env::var("TB_GEOIP_URL").unwrap_or_else(|_| "https://ipwho.is/{ip}".into()),
         })
     }
 }

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AccessMode, CreateTunnelRequest, MetricsSnapshot, Tunnel } from "@tunnelbridge/api-types";
+import type { AccessMode, CreateTunnelRequest, GeoLocation, MetricsSnapshot, Tunnel } from "@tunnelbridge/api-types";
 import ipaddr from "ipaddr.js";
 import {
   Activity, ArrowDownToLine, ArrowUpFromLine, Cable, Check, ChevronRight,
@@ -11,7 +11,7 @@ import {
 type View = "overview" | "tunnels" | "activity" | "settings";
 type AgentStatus = "unconfigured" | "connecting" | "online" | "offline" | "error";
 
-interface EventEntry { at: string; level: "info" | "warn" | "error"; message: string }
+interface EventEntry { at: string; level: "info" | "warn" | "error"; message: string; peer_location?: GeoLocation | null }
 interface AppSnapshot {
   configured: boolean;
   server_url: string | null;
@@ -47,6 +47,25 @@ function formatBytes(value: number) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   return `${(value / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function countryFlag(code: string) {
+  const normalized = code.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(normalized)) return "🌐";
+  return [...normalized].map((letter) => String.fromCodePoint(letter.charCodeAt(0) + 127397)).join("");
+}
+
+function countryLabel(location: GeoLocation) {
+  try {
+    return new Intl.DisplayNames(["zh-CN"], { type: "region" }).of(location.country_code) ?? location.country_name;
+  } catch {
+    return location.country_name;
+  }
+}
+
+function CountryBadge({ location }: { location?: GeoLocation | null }) {
+  if (!location) return <span className="source-location unknown" title="暂时无法解析来源国家"><span aria-hidden="true">🌐</span><span>未知来源</span></span>;
+  return <span className="source-location" title={`${location.country_name} · ${location.country_code}`}><span aria-hidden="true">{countryFlag(location.country_code)}</span><span>{countryLabel(location)}</span></span>;
 }
 
 function statusLabel(status: AgentStatus) {
@@ -240,7 +259,7 @@ function ActivityView({ snapshot }: { snapshot: AppSnapshot }) {
 
 function EventList({ events }: { events: EventEntry[] }) {
   if (!events.length) return <div className="event-empty">等待连接事件…</div>;
-  return <div className="event-list">{events.map((event, index) => <div className="event" key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span className={event.level} /><p>{event.message}</p></div>)}</div>;
+  return <div className="event-list">{events.map((event, index) => <div className="event" key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span className={event.level} /><p className="event-copy"><span>{event.message}</span>{event.peer_location !== undefined && <CountryBadge location={event.peer_location} />}</p></div>)}</div>;
 }
 
 function SettingsView({ snapshot, onReconnect, onNotice }: { snapshot: AppSnapshot; onReconnect: () => void; onNotice: (m: string) => void }) {
