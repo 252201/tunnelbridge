@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly IMAGE_REPOSITORY="ghcr.io/252201/tunnelbridge-server"
-readonly DEFAULT_VERSION="v0.1.1"
+readonly DEFAULT_VERSION="v0.2.0"
 readonly DEFAULT_SSH_PORT="22"
 readonly DEFAULT_SSH_USER="ubuntu"
 readonly DEFAULT_PORT_START="20000"
@@ -62,9 +62,11 @@ usage() {
   TB_SSH_KEY            SSH 私钥路径
   CLOUDFLARE_API_TOKEN  Cloudflare API Token
   TB_DOMAIN             公网域名
-  TB_VERSION            镜像标签，默认 v0.1.1
-  TB_PORT_START         TCP 端口池起始值，默认 20000
-  TB_PORT_END           TCP 端口池结束值，默认 20100
+  TB_VERSION            镜像标签，默认 v0.2.0
+  TB_PORT_START         TCP/UDP 端口池起始值，默认 20000
+  TB_PORT_END           TCP/UDP 端口池结束值，默认 20100
+  TB_QUIC_PORT          QUIC 公网 UDP 端口，默认 443
+  TB_KCP_PORT           KCP 公网 UDP 端口，默认 4000
   TB_ACME_EMAIL         Let's Encrypt 联系邮箱（可选）
   TB_ADMIN_PASSWORD     首次管理员密码（建议仅交互输入）
 EOF
@@ -145,6 +147,10 @@ validate_inputs() {
   (( PORT_START >= 1 && PORT_START <= 65535 )) || die "端口池起始值无效。"
   (( PORT_END >= 1 && PORT_END <= 65535 )) || die "端口池结束值无效。"
   (( PORT_START <= PORT_END )) || die "端口池起始值不能大于结束值。"
+  is_integer "$QUIC_PORT" || die "QUIC 端口必须是数字。"
+  is_integer "$KCP_PORT" || die "KCP 端口必须是数字。"
+  (( QUIC_PORT >= 1 && QUIC_PORT <= 65535 )) || die "QUIC 端口范围无效。"
+  (( KCP_PORT >= 1 && KCP_PORT <= 65535 )) || die "KCP 端口范围无效。"
   [[ "$VPS_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "当前脚本要求 VPS_IP 为 IPv4 地址。"
   local octet
   IFS=. read -r -a octets <<< "$VPS_IP"
@@ -293,8 +299,10 @@ prompt_inputs() {
   CF_TOKEN="${CLOUDFLARE_API_TOKEN:-$(prompt_secret 'Cloudflare API Token')}"
   DOMAIN="${TB_DOMAIN:-$(prompt_value '公网域名（例如 tunnelbridge.example.com）' '')}"
   VERSION="${TB_VERSION:-$(prompt_value 'Server 镜像标签' "$DEFAULT_VERSION")}"
-  PORT_START="${TB_PORT_START:-$(prompt_value 'TCP 端口池起始值' "$DEFAULT_PORT_START")}"
-  PORT_END="${TB_PORT_END:-$(prompt_value 'TCP 端口池结束值' "$DEFAULT_PORT_END")}"
+  PORT_START="${TB_PORT_START:-$(prompt_value 'TCP/UDP 端口池起始值' "$DEFAULT_PORT_START")}"
+  PORT_END="${TB_PORT_END:-$(prompt_value 'TCP/UDP 端口池结束值' "$DEFAULT_PORT_END")}"
+  QUIC_PORT="${TB_QUIC_PORT:-443}"
+  KCP_PORT="${TB_KCP_PORT:-4000}"
   ACME_EMAIL="${TB_ACME_EMAIL:-$(prompt_value 'ACME 邮箱（可留空）' '')}"
 
   if [[ -n "${TB_ADMIN_PASSWORD:-}" ]]; then
@@ -316,7 +324,8 @@ print_plan() {
   VPS              ${VPS_USER}@${VPS_IP}:${SSH_PORT}
   公网域名         ${DOMAIN}
   Server 镜像      ${IMAGE_REPOSITORY}:${VERSION}
-  TCP 端口池       ${PORT_START}-${PORT_END}
+  TCP/UDP 端口池   ${PORT_START}-${PORT_END}
+  QUIC / KCP       UDP ${QUIC_PORT} / ${KCP_PORT}
   HTTPS 代理       自动检测 Nginx；若无则启动 Caddy
   Cloudflare 代理  关闭（任意 TCP 端口不能走橙云代理）
   数据目录         ${REMOTE_ROOT}/data
@@ -363,6 +372,23 @@ configure_cloudflare_dns() {
   fi
   [[ "$(json_field "$response" '.success')" == "true" ]] || die "Cloudflare DNS ${action}失败：$(json_errors "$response")"
   log "Cloudflare DNS 已${action}：${DOMAIN} -> ${VPS_IP}（DNS-only）。"
+
+  local wildcard="*.${DOMAIN}" wildcard_json wildcard_id="" wildcard_type=""
+  wildcard_json="$(cf_api "$API_BASE/zones/$ZONE_ID/dns_records?name=%2A.${DOMAIN}")"
+  while IFS=$'\t' read -r id type name content proxied; do
+    [[ -z "${id:-}" ]] && continue
+    wildcard_id="$id"
+    wildcard_type="$type"
+  done <<< "$(record_lines "$wildcard_json")"
+  [[ -z "$wildcard_type" || "$wildcard_type" == "A" ]] || die "$wildcard 已存在非 A 记录，脚本不会覆盖。"
+  payload="{\"type\":\"A\",\"name\":\"$wildcard\",\"content\":\"$VPS_IP\",\"ttl\":120,\"proxied\":false}"
+  if [[ -n "$wildcard_id" ]]; then
+    response="$(cf_api -X PUT "$API_BASE/zones/$ZONE_ID/dns_records/$wildcard_id" --data-raw "$payload")"
+  else
+    response="$(cf_api -X POST "$API_BASE/zones/$ZONE_ID/dns_records" --data-raw "$payload")"
+  fi
+  [[ "$(json_field "$response" '.success')" == "true" ]] || die "Cloudflare 通配 DNS 配置失败：$(json_errors "$response")"
+  log "Cloudflare DNS 已配置：${wildcard} -> ${VPS_IP}（DNS-only）。"
 }
 
 detect_remote() {
@@ -371,6 +397,16 @@ detect_remote() {
     || die "SSH 或 Docker 检查失败；请确认 SSH 私钥、用户和免密码 sudo。"
 
   WEB_MODE="$(run_remote 'if command -v nginx >/dev/null 2>&1 && sudo -n nginx -t >/dev/null 2>&1; then echo nginx; else echo caddy; fi')"
+  REPLACE_NGINX=0
+  if [[ "$WEB_MODE" == "nginx" ]]; then
+    warn "检测到 Nginx。自动 HTTPS Web 子域名需要 Caddy On-Demand TLS；继续复用 Nginx 将只支持管理后台、TCP 和 UDP。"
+    if confirm "是否停止并禁用 Nginx，改由 Caddy 接管 80/443（推荐）？"; then
+      WEB_MODE="caddy"
+      REPLACE_NGINX=1
+    else
+      warn "已选择兼容模式：Web 隧道不会获得通配子域名 HTTPS，请勿启用 Web 隧道。"
+    fi
+  fi
   REMOTE_DB_EXISTS="$(run_remote "if sudo -n test -f ${REMOTE_ROOT}/data/tunnelbridge.db; then echo yes; else echo no; fi")"
   if [[ "$REMOTE_DB_EXISTS" == "yes" ]]; then
     if [[ "$ADMIN_PASSWORD_IS_NEW" -eq 1 ]]; then
@@ -391,7 +427,7 @@ detect_remote() {
     local_port_in_use="$(run_remote "ss -ltn 2>/dev/null | awk \"NR > 1 {print \\\$4}\" | grep -E ':${SERVER_LOCAL_PORT}\$' || true")"
     [[ -z "$local_port_in_use" ]] || die "本机端口 ${SERVER_LOCAL_PORT} 已被其他服务占用；脚本不会停止现有服务。"
   fi
-  if [[ "$WEB_MODE" == "caddy" && -n "$ports_in_use" && -z "$existing_caddy" ]]; then
+  if [[ "$WEB_MODE" == "caddy" && "$REPLACE_NGINX" -eq 0 && -n "$ports_in_use" && -z "$existing_caddy" ]]; then
     die "VPS 没有可用的 Nginx，且 80/443 已被占用；脚本不会停止现有服务。"
   fi
 
@@ -429,6 +465,11 @@ ${bootstrap_line}
 TB_SECURE_COOKIES=true
 TB_PORT_START=${PORT_START}
 TB_PORT_END=${PORT_END}
+TB_WEB_BASE_DOMAIN=${DOMAIN}
+TB_QUIC_PORT=${QUIC_PORT}
+TB_QUIC_LISTEN_PORT=7443
+TB_KCP_PORT=${KCP_PORT}
+TB_TRUSTED_PROXY_CIDRS=172.16.0.0/12
 TB_AUDIT_RETENTION_DAYS=30
 RUST_LOG=tunnelbridge_server=info
 EOF
@@ -457,9 +498,15 @@ sudo install -d -o 10001 -g 10001 -m 0750 ${REMOTE_ROOT}/data
 printf '%s\\n'${quoted_env} | sudo tee ${REMOTE_ROOT}/.env >/dev/null
 sudo chmod 0600 ${REMOTE_ROOT}/.env
 sudo docker pull ${image}
-if [ "${OVERWRITE_SERVER}" = 1 ]; then sudo docker rm -f ${SERVER_CONTAINER} >/dev/null; fi
+if [ "${OVERWRITE_SERVER}" = 1 ]; then
+  sudo install -d -m 0750 ${REMOTE_ROOT}/backups
+  sudo docker stop ${SERVER_CONTAINER} >/dev/null || true
+  stamp=\$(date +%Y%m%d%H%M%S)
+  sudo tar -C ${REMOTE_ROOT}/data -czf ${REMOTE_ROOT}/backups/sqlite-\${stamp}.tar.gz tunnelbridge.db tunnelbridge.db-wal tunnelbridge.db-shm 2>/dev/null || sudo tar -C ${REMOTE_ROOT}/data -czf ${REMOTE_ROOT}/backups/sqlite-\${stamp}.tar.gz tunnelbridge.db
+  sudo docker rm ${SERVER_CONTAINER} >/dev/null
+fi
 if [ "${WEB_MODE}" = caddy ]; then sudo docker network inspect ${CADDY_NETWORK} >/dev/null 2>&1 || sudo docker network create ${CADDY_NETWORK} >/dev/null; fi
-sudo docker run -d --name ${SERVER_CONTAINER} --restart unless-stopped ${network_args} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END} -v ${REMOTE_ROOT}/data:/app/data --env-file ${REMOTE_ROOT}/.env ${image} >/dev/null
+sudo docker run -d --name ${SERVER_CONTAINER} --restart unless-stopped ${network_args} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END}/udp -p ${QUIC_PORT}:7443/udp -p ${KCP_PORT}:${KCP_PORT}/udp -v ${REMOTE_ROOT}/data:/app/data --env-file ${REMOTE_ROOT}/.env ${image} >/dev/null
 ready=0
 for i in \$(seq 1 45); do
   if ${health_command}; then ready=1; break; fi
@@ -477,7 +524,7 @@ EOF
 set -eu
 sudo sed -i '/^TB_ADMIN_PASSWORD=/d' ${REMOTE_ROOT}/.env
 sudo docker rm -f ${SERVER_CONTAINER} >/dev/null
-sudo docker run -d --name ${SERVER_CONTAINER} --restart unless-stopped ${network_args} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END} -v ${REMOTE_ROOT}/data:/app/data --env-file ${REMOTE_ROOT}/.env ${image} >/dev/null
+sudo docker run -d --name ${SERVER_CONTAINER} --restart unless-stopped ${network_args} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END} -p ${PORT_START}-${PORT_END}:${PORT_START}-${PORT_END}/udp -p ${QUIC_PORT}:7443/udp -p ${KCP_PORT}:${KCP_PORT}/udp -v ${REMOTE_ROOT}/data:/app/data --env-file ${REMOTE_ROOT}/.env ${image} >/dev/null
 ready=0
 for i in \$(seq 1 45); do
   if ${health_command}; then ready=1; break; fi
@@ -651,10 +698,16 @@ configure_caddy() {
   if [[ -n "$ACME_EMAIL" ]]; then
     email_line="    email ${ACME_EMAIL}"
   fi
-  local global_options=""
-  if [[ -n "$email_line" ]]; then
-    global_options="$(printf '{\n%s\n}\n\n' "$email_line")"
-  fi
+  local global_options
+  global_options=$(cat <<EOF
+{
+${email_line}
+    on_demand_tls {
+        ask http://${SERVER_CONTAINER}:8080/api/v1/internal/tls/ask
+    }
+}
+EOF
+)
   local caddyfile
   caddyfile=$(cat <<EOF
 ${global_options}
@@ -670,6 +723,22 @@ ${DOMAIN} {
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
     }
 }
+
+http:// {
+    redir https://{host}{uri} permanent
+}
+
+https:// {
+    tls {
+        on_demand
+    }
+    reverse_proxy ${SERVER_CONTAINER}:8080 {
+        rewrite /api/v1/internal/web-proxy
+        header_up X-TunnelBridge-Original-URI {http.request.orig_uri}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-For {remote_host}
+    }
+}
 EOF
 )
   local quoted_caddyfile
@@ -677,12 +746,19 @@ EOF
   local script
   script=$(cat <<EOF
 set -eu
+if [ "${REPLACE_NGINX}" = 1 ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl disable --now nginx
+  else
+    sudo nginx -s stop
+  fi
+fi
 sudo install -d -m 0750 ${REMOTE_ROOT}/caddy-data ${REMOTE_ROOT}/caddy-config
 printf '%s' ${quoted_caddyfile} | sudo tee ${REMOTE_ROOT}/Caddyfile >/dev/null
 sudo chmod 0640 ${REMOTE_ROOT}/Caddyfile
 sudo docker pull caddy:2.10-alpine
 if [ "${OVERWRITE_CADDY}" = 1 ]; then sudo docker rm -f ${CADDY_CONTAINER} >/dev/null; fi
-sudo docker run -d --name ${CADDY_CONTAINER} --restart unless-stopped --network ${CADDY_NETWORK} -p 80:80 -p 443:443 -v ${REMOTE_ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro -v ${REMOTE_ROOT}/caddy-data:/data -v ${REMOTE_ROOT}/caddy-config:/config caddy:2.10-alpine >/dev/null
+sudo docker run -d --name ${CADDY_CONTAINER} --restart unless-stopped --network ${CADDY_NETWORK} -p 80:80/tcp -p 443:443/tcp -v ${REMOTE_ROOT}/Caddyfile:/etc/caddy/Caddyfile:ro -v ${REMOTE_ROOT}/caddy-data:/data -v ${REMOTE_ROOT}/caddy-config:/config caddy:2.10-alpine >/dev/null
 sleep 3
 sudo docker ps --filter name=^/${CADDY_CONTAINER}\$ --format '{{.Status}}' | grep -q '^Up'
 EOF
@@ -732,7 +808,9 @@ verify_deployment() {
   管理后台：${base_url}/
   客户端服务器地址：${base_url}
   GHCR 镜像：${IMAGE_REPOSITORY}:${VERSION}
-  TCP 映射端口池：${PORT_START}-${PORT_END}
+  TCP / UDP 代理端口池：${PORT_START}-${PORT_END}
+  QUIC 承载：UDP ${QUIC_PORT}
+  KCP 承载：UDP ${KCP_PORT}
 EOF
   if [[ "$ADMIN_PASSWORD_IS_NEW" -eq 1 ]]; then
     cat <<EOF
@@ -748,10 +826,12 @@ EOF
   fi
   cat <<EOF
 
-创建隧道后，HTTP 本地服务的公网地址形如：
-  http://${DOMAIN}:<远程端口>
+创建隧道后：
+  TCP / UDP：${DOMAIN}:<远程端口>
+  Web HTTPS：https://<slug>.${DOMAIN}
+  Web HTTP 会自动跳转到 HTTPS。
 
-Cloudflare DNS 记录保持 DNS-only，因为橙云代理不能转发 20000–20100 的任意 TCP 端口。
+Cloudflare 主域名和通配子域名都保持 DNS-only，以便直连代理端口和 Caddy 动态证书。
 EOF
 }
 
@@ -779,7 +859,8 @@ main() {
   cat <<'EOF'
 TunnelBridge Server 交互式部署
 -------------------------------
-脚本不会停止未知服务；80/443 若被占用，会优先复用现有 Nginx。
+脚本不会停止未知服务；只有经你明确确认时才会停止并禁用已检测到的 Nginx。
+若检测到 Nginx，脚本会询问是否改由 Caddy 接管 80/443，以启用 Web 隧道的按需 HTTPS 证书。
 Cloudflare 仅用于 DNS，Token 和 SSH 私钥不会上传到 VPS。
 EOF
   prompt_inputs

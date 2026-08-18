@@ -1,6 +1,7 @@
 mod agent;
 mod commands;
 mod config;
+mod kcp;
 mod runtime;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub fn run() {
             commands::update_tunnel,
             commands::delete_tunnel,
             commands::set_all_enabled,
+            commands::set_transport_mode,
             commands::get_autostart,
             commands::set_autostart,
             commands::check_for_updates,

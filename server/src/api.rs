@@ -2,10 +2,11 @@ use std::net::SocketAddr;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -13,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::sync::mpsc;
 use tunnelbridge_protocol::{
-    ActiveConnection, AgentControlMessage, AuditEntry, CreateDeviceRequest, CreateTunnelRequest,
-    Device, DeviceTokenResponse, LoginRequest, LoginResponse, MetricsSnapshot, PROTOCOL_VERSION,
-    Tunnel, TunnelStatus, UpdateTunnelRequest,
+    ActiveConnection, ActiveTransport, AgentControlMessage, AuditEntry, CarrierCapabilities,
+    CreateDeviceRequest, CreateTunnelRequest, Device, DeviceTokenResponse, LoginRequest,
+    LoginResponse, MetricsSnapshot, PROTOCOL_VERSION, Tunnel, TunnelStatus, UpdateTunnelRequest,
 };
 use uuid::Uuid;
 
@@ -62,8 +63,10 @@ pub fn router(state: SharedState) -> Router {
             "/api/v1/agent/tunnels/{id}",
             patch(agent_update_tunnel).delete(agent_delete_tunnel),
         )
-        .route("/api/v1/agent/control", get(agent_control))
-        .route("/api/v1/agent/data/{connection_id}", get(agent_data))
+        .route("/api/v2/agent/carrier", get(agent_carrier))
+        .route("/api/v1/agent/enrollment", get(agent_enrollment))
+        .route("/api/v1/internal/tls/ask", get(tls_ask))
+        .route("/api/v1/internal/web-proxy", any(web_proxy))
         .with_state(state)
 }
 
@@ -449,6 +452,9 @@ struct ServerSettingsResponse {
     connect_timeout_seconds: u64,
     idle_timeout_seconds: u64,
     audit_retention_days: i64,
+    web_base_domain: String,
+    quic_port: u16,
+    kcp_port: u16,
 }
 
 async fn admin_settings(
@@ -463,6 +469,9 @@ async fn admin_settings(
         connect_timeout_seconds: state.config.connect_timeout.as_secs(),
         idle_timeout_seconds: state.config.idle_timeout.as_secs(),
         audit_retention_days: state.config.audit_retention_days,
+        web_base_domain: state.config.web_base_domain.clone(),
+        quic_port: state.config.quic_port,
+        kcp_port: state.config.kcp_port,
     }))
 }
 
@@ -516,7 +525,7 @@ async fn change_password(
     Ok(response)
 }
 
-async fn agent_control(
+async fn agent_carrier(
     State(state): State<SharedState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -535,11 +544,14 @@ async fn run_control_socket(
     let disconnect = tokio_util::sync::CancellationToken::new();
     let (mut writer, mut reader) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let (binary_tx, mut binary_rx) = mpsc::channel::<Vec<u8>>(256);
     state.agents.insert(
         agent_id,
         AgentPeer {
             session_id,
             sender: tx.clone(),
+            binary_sender: binary_tx,
+            transport: ActiveTransport::Wss,
             cancellation: disconnect.clone(),
         },
     );
@@ -551,18 +563,25 @@ async fn run_control_socket(
     let _ = tx.send(AgentControlMessage::Welcome {
         protocol_version: PROTOCOL_VERSION,
         server_time: Utc::now(),
+        capabilities: server_capabilities(),
+        transport: Some(ActiveTransport::Wss),
     });
+    state
+        .counters
+        .wss
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     gateway::sync_agent(&state, agent_id).await;
     let writer_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            let Ok(json) = serde_json::to_string(&message) else {
-                continue;
+        loop {
+            let message = tokio::select! {
+                message = rx.recv() => match message {
+                    Some(message) => serde_json::to_string(&message).ok().map(|json| axum::extract::ws::Message::Text(json.into())),
+                    None => None,
+                },
+                message = binary_rx.recv() => message.map(|bytes| axum::extract::ws::Message::Binary(bytes.into())),
             };
-            if writer
-                .send(axum::extract::ws::Message::Text(json.into()))
-                .await
-                .is_err()
-            {
+            let Some(message) = message else { break };
+            if writer.send(message).await.is_err() {
                 break;
             }
         }
@@ -588,17 +607,41 @@ async fn run_control_socket(
                         });
                         break;
                     }
+                    Ok(AgentControlMessage::ConnectionAck {
+                        connection_id,
+                        accepted,
+                        error,
+                        ticket,
+                    }) => {
+                        if !gateway::acknowledge_connection(
+                            &state,
+                            connection_id,
+                            agent_id,
+                            ticket.as_deref(),
+                            accepted,
+                            error,
+                        ) {
+                            tracing::warn!(agent_id = %agent_id, connection_id = %connection_id, "invalid or expired stream acknowledgement");
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         tracing::warn!(agent_id = %agent_id, error = %error, "invalid control message")
                     }
                 }
             }
+            axum::extract::ws::Message::Binary(frame) => {
+                gateway::route_carrier_frame(&state, &frame).await;
+            }
             axum::extract::ws::Message::Close(_) => break,
             _ => {}
         }
     }
     writer_task.abort();
+    state
+        .counters
+        .wss
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     if state
         .agents
         .get(&agent_id)
@@ -609,22 +652,153 @@ async fn run_control_socket(
     tracing::info!(agent_id = %agent_id, agent_name = %name, "agent disconnected");
 }
 
-async fn agent_data(
+async fn agent_enrollment(
     State(state): State<SharedState>,
-    Path(connection_id): Path<Uuid>,
     headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Result<Response, AppError> {
+) -> Result<Json<tunnelbridge_protocol::AgentEnrollmentResponse>, AppError> {
     let agent = require_device(&state, &headers).await?;
-    let ticket = headers
-        .get("x-tunnel-ticket")
-        .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::Unauthorized)?;
-    let sender = gateway::claim_data_channel(&state, connection_id, agent.id, ticket)
-        .ok_or(AppError::Unauthorized)?;
-    Ok(ws.on_upgrade(move |socket| async move {
-        let _ = sender.send(socket);
+    Ok(Json(tunnelbridge_protocol::AgentEnrollmentResponse {
+        tunnels: decorate_tunnels(&state, tunnels::list_for_agent(&state.db, agent.id).await?),
+        transport_fingerprint: crate::transport_identity::fingerprint(&state).to_owned(),
+        transport_certificate_der: crate::transport_identity::certificate_base64()
+            .map_err(AppError::Internal)?,
+        quic_port: state.config.quic_port,
+        kcp_port: state.config.kcp_port,
+        capabilities: server_capabilities(),
     }))
+}
+
+#[derive(Deserialize)]
+struct TlsAskQuery {
+    domain: String,
+}
+
+async fn tls_ask(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(query): Query<TlsAskQuery>,
+) -> Result<StatusCode, AppError> {
+    require_trusted_proxy(&state, peer.ip())?;
+    if tunnels::hostname_is_enabled(&state.db, &query.domain).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+async fn web_proxy(
+    State(state): State<SharedState>,
+    ConnectInfo(proxy_peer): ConnectInfo<SocketAddr>,
+    mut request: Request<Body>,
+) -> Result<Response, AppError> {
+    require_trusted_proxy(&state, proxy_peer.ip())?;
+    let hostname = request
+        .headers()
+        .get("x-forwarded-host")
+        .or_else(|| request.headers().get(header::HOST))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+        .ok_or_else(|| AppError::BadRequest("missing forwarded host".into()))?
+        .to_ascii_lowercase();
+    let peer_ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| gateway::parse_forwarded_ip(Some(value)))
+        .ok_or_else(|| AppError::BadRequest("missing forwarded source address".into()))?;
+    let tunnel = tunnels::get_by_hostname(&state.db, &hostname).await?;
+    let peer = SocketAddr::new(peer_ip, 0);
+    let stream = match gateway::open_virtual_stream(state.clone(), tunnel, peer).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(hostname, error = %error, "web tunnel unavailable");
+            return Ok((StatusCode::BAD_GATEWAY, "Tunnel target is unavailable").into_response());
+        }
+    };
+    if let Some(original_uri) = request
+        .headers()
+        .get("x-tunnelbridge-original-uri")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+    {
+        *request.uri_mut() = original_uri;
+    }
+    for name in [
+        "x-tunnelbridge-original-uri",
+        "x-tunnelbridge-proxy",
+        "x-real-ip",
+    ] {
+        request.headers_mut().remove(name);
+    }
+    let wants_upgrade = request.headers().contains_key(header::UPGRADE);
+    let incoming_upgrade = wants_upgrade.then(|| hyper::upgrade::on(&mut request));
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.with_upgrades().await {
+            tracing::debug!(error = %error, "local web connection closed");
+        }
+    });
+    let mut response = sender
+        .send_request(request)
+        .await
+        .map_err(|error| AppError::Internal(error.into()))?;
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS
+        && let Some(incoming_upgrade) = incoming_upgrade
+    {
+        let outgoing_upgrade = hyper::upgrade::on(&mut response);
+        tokio::spawn(async move {
+            if let (Ok(incoming), Ok(outgoing)) = tokio::join!(incoming_upgrade, outgoing_upgrade) {
+                let mut incoming = hyper_util::rt::TokioIo::new(incoming);
+                let mut outgoing = hyper_util::rt::TokioIo::new(outgoing);
+                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+            }
+        });
+    }
+    state
+        .counters
+        .http_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (parts, body) = response.into_parts();
+    Ok(Response::from_parts(parts, Body::new(body)))
+}
+
+fn require_trusted_proxy(state: &SharedState, address: std::net::IpAddr) -> Result<(), AppError> {
+    let address = match address {
+        std::net::IpAddr::V6(value) => value
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(value)),
+        value => value,
+    };
+    if state
+        .config
+        .trusted_proxy_cidrs
+        .iter()
+        .any(|network| network.contains(&address))
+    {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+pub(crate) fn server_capabilities() -> CarrierCapabilities {
+    CarrierCapabilities {
+        transports: vec![
+            ActiveTransport::Quic,
+            ActiveTransport::Kcp,
+            ActiveTransport::Wss,
+        ],
+        tunnel_kinds: vec![
+            tunnelbridge_protocol::TunnelKind::Tcp,
+            tunnelbridge_protocol::TunnelKind::Udp,
+            tunnelbridge_protocol::TunnelKind::Web,
+        ],
+        ..CarrierCapabilities::default()
+    }
 }
 
 fn decorate_tunnels(state: &SharedState, values: Vec<Tunnel>) -> Vec<Tunnel> {
@@ -637,7 +811,9 @@ fn decorate_tunnels(state: &SharedState, values: Vec<Tunnel>) -> Vec<Tunnel> {
 fn decorate_tunnel(state: &SharedState, mut tunnel: Tunnel) -> Tunnel {
     tunnel.status = if !tunnel.enabled {
         TunnelStatus::Stopped
-    } else if !state.listeners.contains_key(&tunnel.id) {
+    } else if tunnel.kind != tunnelbridge_protocol::TunnelKind::Web
+        && !state.listeners.contains_key(&tunnel.id)
+    {
         TunnelStatus::Error
     } else if !state.agents.contains_key(&tunnel.agent_id) {
         TunnelStatus::AgentOffline

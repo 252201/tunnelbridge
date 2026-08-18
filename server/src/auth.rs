@@ -181,6 +181,24 @@ pub async fn require_device(
     })
 }
 
+pub async fn authenticate_device_token(
+    state: &SharedState,
+    token: &str,
+) -> Result<DeviceIdentity, AppError> {
+    let row =
+        sqlx::query("SELECT id, name FROM devices WHERE token_hash = ? AND revoked = 0 LIMIT 1")
+            .bind(hash_token(token))
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+    let id =
+        Uuid::parse_str(row.get::<String, _>("id").as_str()).map_err(|_| AppError::Unauthorized)?;
+    Ok(DeviceIdentity {
+        id,
+        name: row.get("name"),
+    })
+}
+
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?

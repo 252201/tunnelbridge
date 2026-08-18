@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tunnelbridge_protocol::TransportMode;
 use url::Url;
 use uuid::Uuid;
 
@@ -12,6 +13,20 @@ pub struct AgentConfig {
     pub server_url: String,
     pub device_name: String,
     pub installation_id: Uuid,
+    #[serde(default)]
+    pub transport_mode: TransportMode,
+    #[serde(default = "default_quic_port")]
+    pub quic_port: u16,
+    #[serde(default = "default_kcp_port")]
+    pub kcp_port: u16,
+}
+
+fn default_quic_port() -> u16 {
+    443
+}
+
+fn default_kcp_port() -> u16 {
+    4000
 }
 
 pub fn normalize_server_url(value: &str) -> Result<String> {
@@ -62,6 +77,42 @@ pub fn load_token(installation_id: Uuid) -> Result<String> {
         .context("从 macOS 钥匙串读取设备令牌")
 }
 
+pub fn save_transport_fingerprint(installation_id: Uuid, fingerprint: &str) -> Result<()> {
+    keyring::Entry::new(
+        KEYCHAIN_SERVICE,
+        &format!("{installation_id}:transport-fingerprint"),
+    )?
+    .set_password(fingerprint)
+    .context("将传输证书指纹写入 macOS 钥匙串")
+}
+
+pub fn load_transport_fingerprint(installation_id: Uuid) -> Result<String> {
+    keyring::Entry::new(
+        KEYCHAIN_SERVICE,
+        &format!("{installation_id}:transport-fingerprint"),
+    )?
+    .get_password()
+    .context("从 macOS 钥匙串读取传输证书指纹")
+}
+
+pub fn save_transport_certificate(installation_id: Uuid, certificate_der: &str) -> Result<()> {
+    keyring::Entry::new(
+        KEYCHAIN_SERVICE,
+        &format!("{installation_id}:transport-certificate"),
+    )?
+    .set_password(certificate_der)
+    .context("将传输证书写入 macOS 钥匙串")
+}
+
+pub fn load_transport_certificate(installation_id: Uuid) -> Result<String> {
+    keyring::Entry::new(
+        KEYCHAIN_SERVICE,
+        &format!("{installation_id}:transport-certificate"),
+    )?
+    .get_password()
+    .context("从 macOS 钥匙串读取传输证书")
+}
+
 fn is_loopback_host(host: &str) -> bool {
     host == "localhost"
         || host
@@ -78,5 +129,15 @@ mod tests {
         assert!(normalize_server_url("https://relay.example.com/path").is_ok());
         assert!(normalize_server_url("http://127.0.0.1:8080").is_ok());
         assert!(normalize_server_url("http://relay.example.com").is_err());
+    }
+
+    #[test]
+    fn old_configs_receive_v2_transport_ports() {
+        let config: AgentConfig = serde_json::from_str(
+            r#"{"server_url":"https://relay.example.com","device_name":"Mac","installation_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.quic_port, 443);
+        assert_eq!(config.kcp_port, 4000);
     }
 }

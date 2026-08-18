@@ -17,12 +17,19 @@ tauri-build = { version = "2.5", features = [] }
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
+dashmap = "6.1"
 futures-util.workspace = true
 http.workspace = true
+hex.workspace = true
 keyring = { version = "3.6", features = ["apple-native"] }
 rand.workspace = true
+quinn.workspace = true
+kcp-tokio.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.11", features = ["tray-icon"] }
@@ -30,6 +37,7 @@ tauri-plugin-autostart = "2.5"
 tauri-plugin-opener = "2.5"
 tauri-plugin-updater = "2.10"
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util = "0.7"
 tracing.workspace = true
@@ -37,3 +45,4 @@ tracing-subscriber.workspace = true
 tunnelbridge-protocol = { path = "../../crates/protocol" }
 url.workspace = true
 uuid.workspace = true
+webpki-roots = "1.0"

@@ -1,6 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use ipnet::IpNet;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -17,6 +18,13 @@ pub struct Config {
     pub audit_retention_days: i64,
     pub secure_cookies: bool,
     pub geoip_url: String,
+    pub web_base_domain: String,
+    pub quic_port: u16,
+    pub quic_listen_port: u16,
+    pub kcp_port: u16,
+    pub udp_session_timeout: Duration,
+    pub transport_cert_dir: PathBuf,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
 impl Config {
@@ -48,6 +56,30 @@ impl Config {
             audit_retention_days: parse_env("TB_AUDIT_RETENTION_DAYS", 30)?,
             secure_cookies: env::var("TB_SECURE_COOKIES").map_or(true, |v| v != "false"),
             geoip_url: env::var("TB_GEOIP_URL").unwrap_or_else(|_| "https://ipwho.is/{ip}".into()),
+            web_base_domain: env::var("TB_WEB_BASE_DOMAIN")
+                .unwrap_or_else(|_| "tunnelbridge.252202.xyz".into())
+                .trim_matches('.')
+                .to_ascii_lowercase(),
+            quic_port: parse_env("TB_QUIC_PORT", 443)?,
+            quic_listen_port: parse_env("TB_QUIC_LISTEN_PORT", 7443)?,
+            kcp_port: parse_env("TB_KCP_PORT", 4000)?,
+            udp_session_timeout: Duration::from_secs(parse_env(
+                "TB_UDP_SESSION_TIMEOUT_SECONDS",
+                60,
+            )?),
+            transport_cert_dir: env::var("TB_TRANSPORT_CERT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("data/transport")),
+            trusted_proxy_cidrs: env::var("TB_TRUSTED_PROXY_CIDRS")
+                .unwrap_or_else(|_| "172.16.0.0/12".into())
+                .split(',')
+                .map(|value| {
+                    value
+                        .trim()
+                        .parse()
+                        .context("invalid TB_TRUSTED_PROXY_CIDRS")
+                })
+                .collect::<Result<Vec<_>>>()?,
         })
     }
 }

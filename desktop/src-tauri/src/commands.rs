@@ -5,12 +5,18 @@ use serde::{Serialize, de::DeserializeOwned};
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_updater::UpdaterExt;
-use tunnelbridge_protocol::{ApiError, CreateTunnelRequest, Tunnel, UpdateTunnelRequest};
+use tunnelbridge_protocol::{
+    AgentEnrollmentResponse, ApiError, CreateTunnelRequest, TransportMode, Tunnel,
+    UpdateTunnelRequest,
+};
 use uuid::Uuid;
 
 use crate::{
     agent,
-    config::{AgentConfig, load_token, normalize_server_url, save_config, save_token},
+    config::{
+        AgentConfig, load_token, normalize_server_url, save_config, save_token,
+        save_transport_certificate, save_transport_fingerprint,
+    },
     runtime::{AppSnapshot, RuntimeState},
 };
 
@@ -35,12 +41,12 @@ pub async fn configure_server(
         return Err("设备名称需要包含 1 到 80 个字符".into());
     }
     let client = Client::new();
-    let initial_tunnels: Vec<Tunnel> = request(
+    let enrollment: AgentEnrollmentResponse = request(
         &client,
         &server_url,
         token.trim(),
         Method::GET,
-        "/api/v1/agent/tunnels",
+        "/api/v1/agent/enrollment",
         Option::<&()>::None,
     )
     .await?;
@@ -50,15 +56,28 @@ pub async fn configure_server(
         .await
         .as_ref()
         .map(|value| value.installation_id);
+    let previous = state.config.read().await.clone();
     let config = AgentConfig {
         server_url,
         device_name: name.into(),
         installation_id: existing_id.unwrap_or_else(Uuid::new_v4),
+        transport_mode: previous
+            .as_ref()
+            .map_or(TransportMode::Auto, |value| value.transport_mode),
+        quic_port: enrollment.quic_port,
+        kcp_port: enrollment.kcp_port,
     };
     save_token(config.installation_id, token.trim()).map_err(display_error)?;
+    save_transport_fingerprint(config.installation_id, &enrollment.transport_fingerprint)
+        .map_err(display_error)?;
+    save_transport_certificate(
+        config.installation_id,
+        &enrollment.transport_certificate_der,
+    )
+    .map_err(display_error)?;
     save_config(&state.config_path(), &config).map_err(display_error)?;
     *state.config.write().await = Some(config);
-    *state.tunnels.write().await = initial_tunnels;
+    *state.tunnels.write().await = enrollment.tunnels;
     state.log("info", "服务器配置已验证并保存").await;
     agent::restart_agent(state.inner().clone());
     Ok(())
@@ -134,6 +153,22 @@ pub async fn set_all_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     set_all_enabled_inner(state.inner().clone(), enabled).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_transport_mode(
+    state: State<'_, Arc<RuntimeState>>,
+    mode: TransportMode,
+) -> Result<(), String> {
+    let mut config = state.config.read().await.clone().ok_or("尚未配置服务器")?;
+    config.transport_mode = mode;
+    save_config(&state.config_path(), &config).map_err(display_error)?;
+    *state.config.write().await = Some(config);
+    state
+        .log("info", format!("承载策略已切换为 {mode:?}"))
+        .await;
+    agent::restart_agent(state.inner().clone());
+    Ok(())
 }
 
 pub async fn set_all_enabled_inner(state: Arc<RuntimeState>, enabled: bool) -> Result<(), String> {

@@ -1,3 +1,9 @@
+{
+  on_demand_tls {
+    ask http://tunnelbridge:8080/api/v1/internal/tls/ask
+  }
+}
+
 {$TB_DOMAIN} {
   encode zstd gzip
   reverse_proxy tunnelbridge:8080 {
@@ -16,5 +22,27 @@
   log {
     output stdout
     format json
+  }
+}
+
+http:// {
+  redir https://{host}{uri} permanent
+}
+
+https:// {
+  tls {
+    on_demand
+  }
+  reverse_proxy tunnelbridge:8080 {
+    rewrite /api/v1/internal/web-proxy
+    header_up X-TunnelBridge-Original-URI {http.request.orig_uri}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-For {remote_host}
+  }
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "same-origin"
+    X-Frame-Options "SAMEORIGIN"
   }
 }

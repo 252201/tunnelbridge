@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tunnelbridge_protocol::{GeoLocation, MetricsSnapshot, Tunnel};
+use tunnelbridge_protocol::{ActiveTransport, GeoLocation, MetricsSnapshot, TransportMode, Tunnel};
 
 use crate::config::AgentConfig;
 
@@ -37,6 +37,9 @@ pub struct AppSnapshot {
     pub tunnels: Vec<Tunnel>,
     pub metrics: MetricsSnapshot,
     pub events: Vec<EventEntry>,
+    pub active_transport: Option<ActiveTransport>,
+    pub transport_fallback_reason: Option<String>,
+    pub transport_mode: Option<TransportMode>,
 }
 
 pub struct RuntimeState {
@@ -48,6 +51,7 @@ pub struct RuntimeState {
     pub metrics: RwLock<MetricsSnapshot>,
     pub events: RwLock<VecDeque<EventEntry>>,
     pub cancellation: Mutex<Option<CancellationToken>>,
+    pub transport: RwLock<(Option<ActiveTransport>, Option<String>)>,
 }
 
 impl RuntimeState {
@@ -61,6 +65,7 @@ impl RuntimeState {
             metrics: RwLock::new(MetricsSnapshot::default()),
             events: RwLock::new(VecDeque::new()),
             cancellation: Mutex::new(None),
+            transport: RwLock::new((None, None)),
         }
     }
 
@@ -82,6 +87,10 @@ impl RuntimeState {
         self.log_with_location(level, message, None).await;
     }
 
+    pub async fn set_transport(&self, transport: ActiveTransport, fallback_reason: Option<String>) {
+        *self.transport.write().await = (Some(transport), fallback_reason);
+    }
+
     pub async fn log_with_location(
         &self,
         level: &str,
@@ -101,14 +110,18 @@ impl RuntimeState {
     pub async fn snapshot(&self) -> AppSnapshot {
         let config = self.config.read().await.clone();
         let (status, status_message) = self.status.read().await.clone();
+        let (active_transport, transport_fallback_reason) = self.transport.read().await.clone();
         AppSnapshot {
             configured: config.is_some(),
-            server_url: config.map(|value| value.server_url),
+            server_url: config.as_ref().map(|value| value.server_url.clone()),
+            transport_mode: config.as_ref().map(|value| value.transport_mode),
             status,
             status_message,
             tunnels: self.tunnels.read().await.clone(),
             metrics: self.metrics.read().await.clone(),
             events: self.events.read().await.iter().cloned().collect(),
+            active_transport,
+            transport_fallback_reason,
         }
     }
 }

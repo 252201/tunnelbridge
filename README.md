@@ -1,12 +1,13 @@
 # TunnelBridge
 
-TunnelBridge 是一套面向个人开发者的自托管 TCP 内网穿透工具。Mac 客户端只建立出站 HTTPS/WSS 连接，公网中继收到 TCP 连接后，通过短期一次性票据为该连接建立独立数据通道。
+TunnelBridge 是一套面向个人开发者的自托管多协议内网穿透工具。Mac 客户端只建立出站 QUIC、KCP/TLS 或 WSS 承载连接，并在一条持久会话中复用 TCP、UDP 和 Web 流。
 
 ## 功能
 
-- Rust/Axum 公网中继、SQLite 持久化和动态 TCP 端口监听。
+- Rust/Axum 公网中继、SQLite 持久化和动态 TCP/UDP 端口监听。
 - Tauri 2 macOS 客户端，令牌存入 macOS Keychain，关闭窗口后继续在菜单栏运行。
-- TCP 映射、IPv4/IPv6 CIDR 白名单、显式公开访问和局域网目标确认。
+- TCP 多路复用、UDP 会话、自动 HTTPS 子域名、IPv4/IPv6 CIDR 白名单和局域网目标确认。
+- QUIC 优先并自动回退 WSS，也可显式选择 KCP/TLS 或 WSS。
 - 单管理员 Web 控制台、设备令牌、隧道状态、活动连接、指标和审计记录。
 - Docker Compose + Caddy 自动 HTTPS，GHCR 多架构镜像发布配置。
 - Universal macOS DMG、ad-hoc 签名和 Tauri 签名更新工作流。
@@ -46,22 +47,22 @@ cargo run -p tunnelbridge-server
 pnpm dlx @tauri-apps/cli@latest dev --config desktop/src-tauri/tauri.conf.json
 ```
 
-在管理后台的“设备与令牌”页创建设备，把只展示一次的令牌粘贴到 Mac 客户端，然后创建 TCP 隧道。
+在管理后台的“设备与令牌”页创建设备，把只展示一次的令牌粘贴到 Mac 客户端，然后创建 TCP、UDP 或 Web 隧道。Web 隧道的公网 HTTP 会自动跳转到 HTTPS。
 
 ## VPS 部署
 
 ### 交互式一键部署
 
-仓库提供了一个不会上传密钥、可重复执行的部署脚本。它会通过 SSH 检查 Docker，自动拉取 GHCR 镜像、创建/更新 Cloudflare DNS A 记录、初始化 SQLite，并配置 HTTPS 入口。VPS 上已有可用 Nginx 时会备份并复用它；没有 Nginx 且 80/443 空闲时会启动 Caddy。
+仓库提供了一个不会上传密钥、可重复执行的部署脚本。它会通过 SSH 检查 Docker，自动拉取 GHCR 镜像、创建/更新 Cloudflare DNS A 记录、初始化 SQLite，并配置 HTTPS 入口。若 VPS 已有 Nginx，脚本会询问是否由 Caddy 接管 80/443；确认后才会停止并禁用 Nginx。保留 Nginx 的兼容模式只支持管理后台、TCP 和 UDP，动态 Web 子域名必须使用 Caddy On-Demand TLS。
 
-本机需要 `curl`、`jq` 或 `python3`、`ssh`、`openssl` 和 `ssh-keygen`。VPS 需要 Linux、Docker、免密码 `sudo`，并在安全组放行 SSH、80、443 及 TCP 映射端口池：
+本机需要 `curl`、`jq` 或 `python3`、`ssh`、`openssl` 和 `ssh-keygen`。VPS 需要 Linux、Docker、免密码 `sudo`，并在安全组放行 SSH、TCP 80/443、UDP 443、UDP 4000 及 TCP/UDP 映射端口池：
 
 ```bash
 chmod +x scripts/deploy-server.sh
 ./scripts/deploy-server.sh
 ```
 
-脚本会交互询问 VPS IPv4、SSH 私钥、Cloudflare API Token、域名、镜像版本、TCP 端口池、ACME 邮箱和管理员密码。管理员密码留空时自动生成高熵密码，只在终端最后显示一次；首次初始化后会从容器环境中移除。已有数据库不会重置管理员密码。可以先用以下命令检查输入和部署计划，完全不会连接 VPS 或调用 Cloudflare API：
+脚本会交互询问 VPS IPv4、SSH 私钥、Cloudflare API Token、域名、镜像版本、TCP/UDP 端口池、ACME 邮箱和管理员密码。它会创建主域名和 DNS-only 通配记录，并在升级前备份 SQLite。管理员密码留空时自动生成高熵密码，只在终端最后显示一次；首次初始化后会从容器环境中移除。已有数据库不会重置管理员密码。可以先用以下命令检查输入和部署计划，完全不会连接 VPS 或调用 Cloudflare API：
 
 ```bash
 ./scripts/deploy-server.sh --dry-run
@@ -92,7 +93,7 @@ docker compose up -d --build
 3. 打开 `https://$TB_DOMAIN`，使用 `admin` 和 `TB_ADMIN_PASSWORD` 登录。
 4. 首次初始化后，密码哈希已写入 SQLite；可从运行环境移除 `TB_ADMIN_PASSWORD`。删除数据卷会重新触发首次初始化。
 
-Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中继容器直接监听，因此云安全组和宿主机防火墙必须同时放行对应范围。
+Caddy 负责管理后台、REST/WSS、HTTP→HTTPS 跳转和按需子域名证书。QUIC 使用 UDP 443，KCP 默认使用 UDP 4000；映射端口由中继容器直接监听，因此云安全组和宿主机防火墙必须同时放行对应 TCP/UDP 范围。
 
 ## 安全模型
 
@@ -100,7 +101,8 @@ Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中�
 - 非回环本地目标必须显式允许，以避免无意暴露局域网服务。
 - 设备令牌为高熵随机值，服务端仅保存 BLAKE3 哈希；桌面端仅保存在 Keychain。
 - 管理密码使用 Argon2id；管理会话使用 HttpOnly、Secure、SameSite=Strict Cookie 和 CSRF Token。
-- 每个 TCP 会话使用 15 秒有效、一次消费的数据票据。票据和设备令牌不会写入应用日志。
+- 每个 TCP 流和 UDP 会话使用 15 秒有效、一次消费的数据票据。票据和设备令牌不会写入应用日志。
+- 服务端生成独立持久传输证书，客户端注册时将证书及 SHA-256 指纹固定到 Keychain；QUIC/KCP 不复用 Caddy 私钥。
 - 开启 GeoIP 时，服务端会把允许连接的来源 IP 查询到 `TB_GEOIP_URL`，仅在内存缓存国家结果，不额外保存 GeoIP 查询记录；对隐私有要求时将其设为 `off`。
 - TunnelBridge 不检查或记录转发载荷。SSH、数据库等目标协议仍应启用自身身份认证和加密。
 
@@ -114,7 +116,12 @@ Caddy 负责管理后台、REST API 和 WebSocket 的 TLS。映射端口由中�
 | `TB_DATABASE_URL` | `sqlite://data/tunnelbridge.db?mode=rwc` | SQLite 地址 |
 | `TB_ADMIN_PASSWORD` | 无 | 首次启动必填，至少 12 字符 |
 | `TB_GEOIP_URL` | `https://ipwho.is/{ip}` | 来源 IP 国家解析地址；设为 `off` 可关闭 |
-| `TB_PORT_START` / `TB_PORT_END` | `20000` / `20100` | 公网 TCP 端口池 |
+| `TB_PORT_START` / `TB_PORT_END` | `20000` / `20100` | 公网 TCP/UDP 端口池 |
+| `TB_WEB_BASE_DOMAIN` | `tunnelbridge.252202.xyz` | Web 隧道子域名后缀 |
+| `TB_QUIC_PORT` / `TB_QUIC_LISTEN_PORT` | `443` / `7443` | 客户端可见 QUIC 端口与容器内监听端口 |
+| `TB_KCP_PORT` | `4000` | KCP/TLS UDP 端口 |
+| `TB_UDP_SESSION_TIMEOUT_SECONDS` | `60` | UDP 来源伪会话空闲时间 |
+| `TB_TRUSTED_PROXY_CIDRS` | `172.16.0.0/12` | 可提供 Web 来源转发头的 Caddy 网络 |
 | `TB_TICKET_TTL_SECONDS` | `15` | 数据票据有效期 |
 | `TB_CONNECT_TIMEOUT_SECONDS` | `15` | 等待代理数据通道时间 |
 | `TB_IDLE_TIMEOUT_SECONDS` | `600` | 单连接空闲超时 |
@@ -139,10 +146,10 @@ GitHub Actions 在推送 `v*` 标签时构建 Universal DMG，并发布服务端
 
 ```bash
 cargo fmt --all --check
-cargo clippy -p tunnelbridge-protocol -p tunnelbridge-server --all-targets -- -D warnings
-cargo test -p tunnelbridge-protocol -p tunnelbridge-server
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 pnpm typecheck
 pnpm build:web
 ```
 
-当前首版只支持 TCP。UDP、HTTP 域名路由、P2P 打洞、多管理员、计费和其他桌面平台不在范围内。
+当前版本支持 TCP、UDP 和自动 HTTPS Web 代理。不包含 HTTP-only、自定义域名、HTTPS TLS 透传、HTTP/3、P2P 打洞、多管理员、计费和其他桌面平台。

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AccessMode, CreateTunnelRequest, GeoLocation, MetricsSnapshot, Tunnel } from "@tunnelbridge/api-types";
+import type { AccessMode, ActiveTransport, CreateTunnelRequest, GeoLocation, LocalScheme, MetricsSnapshot, Tunnel, TunnelKind, TransportMode } from "@tunnelbridge/api-types";
 import ipaddr from "ipaddr.js";
 import {
   Activity, ArrowDownToLine, ArrowUpFromLine, Cable, Check, ChevronRight,
@@ -20,16 +20,23 @@ interface AppSnapshot {
   tunnels: Tunnel[];
   metrics: MetricsSnapshot;
   events: EventEntry[];
+  active_transport: ActiveTransport | null;
+  transport_fallback_reason: string | null;
+  transport_mode: TransportMode | null;
 }
 
 const emptyMetrics: MetricsSnapshot = {
   online_agents: 0, active_connections: 0, bytes_up: 0, bytes_down: 0,
   rejected_connections: 0, failed_connections: 0,
+  carrier_sessions: 0, active_udp_sessions: 0, http_requests: 0,
+  quic_connections: 0, kcp_connections: 0, wss_connections: 0,
 };
 
 const defaultSnapshot: AppSnapshot = {
   configured: false, server_url: null, status: "unconfigured",
   status_message: "尚未连接服务器", tunnels: [], metrics: emptyMetrics, events: [],
+  active_transport: null, transport_fallback_reason: null,
+  transport_mode: null,
 };
 let updateCheckStarted = false;
 
@@ -47,6 +54,10 @@ function formatBytes(value: number) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
   return `${(value / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function publicEndpoint(tunnel: Tunnel) {
+  return tunnel.kind === "web" ? `https://${tunnel.hostname}` : `${tunnel.kind.toUpperCase()} :${tunnel.remote_port}`;
 }
 
 function countryFlag(code: string) {
@@ -131,7 +142,7 @@ function App() {
   }
 
   async function removeTunnel(tunnel: Tunnel) {
-    if (!window.confirm(`删除隧道“${tunnel.name}”？远程端口 ${tunnel.remote_port} 将被释放。`)) return;
+    if (!window.confirm(`删除隧道“${tunnel.name}”？公网端点 ${publicEndpoint(tunnel)} 将被释放。`)) return;
     try {
       await command("delete_tunnel", { id: tunnel.id });
       await refresh();
@@ -241,7 +252,7 @@ function TunnelRow({ tunnel, compact, onToggle, onDelete }: { tunnel: Tunnel; co
   return <div className={`tunnel-row ${compact ? "compact" : ""}`}>
     <div className="tunnel-name"><span className={`tunnel-dot ${tunnel.status}`} /><div><strong>{tunnel.name}</strong><small>{stateLabel}</small></div></div>
     <code>{tunnel.local_host}:{tunnel.local_port}</code>
-    <code className="public-port">:{tunnel.remote_port}<Copy size={13} /></code>
+    <code className="public-port">{publicEndpoint(tunnel)}<Copy size={13} /></code>
     {!compact && <span className={`policy ${tunnel.access_mode}`}>{tunnel.access_mode === "allowlist" ? `${tunnel.allowed_cidrs.length} 条白名单` : "公开访问"}</span>}
     {!compact && <div className="row-actions"><button className={`switch ${tunnel.enabled ? "on" : ""}`} role="switch" aria-checked={tunnel.enabled} onClick={() => onToggle?.(tunnel)}><span /></button><button className="ghost-danger" onClick={() => onDelete?.(tunnel)} aria-label={`删除 ${tunnel.name}`}><Trash2 /></button></div>}
   </div>;
@@ -281,11 +292,16 @@ function SettingsView({ snapshot, onReconnect, onNotice }: { snapshot: AppSnapsh
       } else onNotice(result);
     } catch (error) { onNotice(String(error)); }
   }
+  async function changeTransport(mode: TransportMode) {
+    try { await command("set_transport_mode", { mode }); onNotice(`承载策略已切换为 ${mode.toUpperCase()}`); }
+    catch (error) { onNotice(String(error)); }
+  }
   return <div className="view enter"><div className="view-heading"><div><p className="section-index">04 / SYSTEM</p><h1>设置</h1><p>管理中继节点、后台行为和应用更新。</p></div></div>
     <div className="settings-grid">
       <div className="panel settings-card"><Server /><div><h2>中继服务器</h2><p>{snapshot.server_url ?? "尚未配置"}</p><small>设备令牌已存入 macOS 钥匙串，不会显示在界面中。</small></div><button className="secondary" onClick={onReconnect}>{snapshot.configured ? "重新配置" : "连接"}</button></div>
+      <div className="panel settings-card"><Network /><div><h2>承载协议</h2><p>当前：{snapshot.active_transport?.toUpperCase() ?? "未连接"}</p><small>{snapshot.transport_fallback_reason ?? "自动模式优先 QUIC，失败后回退 WSS；KCP 需手动选择。"}</small></div><select value={snapshot.transport_mode ?? "auto"} onChange={(e)=>void changeTransport(e.target.value as TransportMode)}><option value="auto">自动</option><option value="quic">QUIC</option><option value="kcp">KCP</option><option value="wss">WSS</option></select></div>
       <div className="panel settings-card"><Power /><div><h2>登录时启动</h2><p>开机后在菜单栏运行 TunnelBridge</p><small>默认关闭，隧道只会在应用运行时保持连接。</small></div><button className={`switch ${autostart ? "on" : ""}`} role="switch" aria-checked={autostart} onClick={toggleAutostart}><span /></button></div>
-      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.1.1</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
+      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.0</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
     </div>
   </div>;
 }
@@ -314,6 +330,8 @@ function ConnectPanel({ configured, serverUrl, onClose, onConnected, onNotice }:
 function TunnelEditor({ onClose, onSaved, onNotice }: { onClose: () => void; onSaved: () => void; onNotice: (m: string) => void }) {
   const [name, setName] = useState(""); const [host, setHost] = useState("127.0.0.1");
   const [localPort, setLocalPort] = useState("22"); const [remotePort, setRemotePort] = useState("");
+  const [kind, setKind] = useState<TunnelKind>("tcp"); const [localScheme, setLocalScheme] = useState<LocalScheme>("tcp");
+  const [hostname, setHostname] = useState("");
   const [mode, setMode] = useState<AccessMode>("allowlist"); const [cidrs, setCidrs] = useState("");
   const [lanConfirmed, setLanConfirmed] = useState(false); const [publicConfirmed, setPublicConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -327,11 +345,11 @@ function TunnelEditor({ onClose, onSaved, onNotice }: { onClose: () => void; onS
       const invalid = allowedCidrs.find((cidr) => { try { ipaddr.parseCIDR(cidr); return false; } catch { return true; } });
       if (invalid) { onNotice(`CIDR 格式无效：${invalid}`); return; }
     }
-    const request: CreateTunnelRequest = { name, local_host: host, local_port: Number(localPort), remote_port: remotePort ? Number(remotePort) : undefined, access_mode: mode, allowed_cidrs: allowedCidrs, enabled: true, allow_lan_target: !isLoopback && lanConfirmed };
+    const request: CreateTunnelRequest = { name, local_host: host, local_port: Number(localPort), kind, local_scheme: localScheme, remote_port: kind !== "web" && remotePort ? Number(remotePort) : undefined, hostname: kind === "web" ? hostname : undefined, access_mode: mode, allowed_cidrs: allowedCidrs, enabled: true, allow_lan_target: !isLoopback && lanConfirmed };
     setBusy(true); try { await command("create_tunnel", { request }); await onSaved(); } catch (error) { onNotice(String(error)); } finally { setBusy(false); }
   }
-  return <div className="drawer-backdrop"><form className="drawer" onSubmit={submit}><div className="drawer-head"><div><p className="section-index">NEW TCP ROUTE</p><h1>创建隧道</h1></div><button type="button" className="modal-close" onClick={onClose}><X /></button></div>
-    <div className="form-grid"><label className="wide">名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder="生产环境 SSH" required maxLength={80} /></label><label>本地地址<input value={host} onChange={(e) => setHost(e.target.value)} required /></label><label>本地端口<input type="number" min="1" max="65535" value={localPort} onChange={(e) => setLocalPort(e.target.value)} required /></label><label className="wide">远程端口 <small>留空自动分配</small><input type="number" min="1" max="65535" value={remotePort} onChange={(e) => setRemotePort(e.target.value)} placeholder="自动" /></label></div>
+  return <div className="drawer-backdrop"><form className="drawer" onSubmit={submit}><div className="drawer-head"><div><p className="section-index">NEW MULTI-PROTOCOL ROUTE</p><h1>创建隧道</h1></div><button type="button" className="modal-close" onClick={onClose}><X /></button></div>
+    <div className="form-grid"><label className="wide">代理类型<select value={kind} onChange={(e) => { const next=e.target.value as TunnelKind; setKind(next); setLocalScheme(next === "tcp" ? "tcp" : next === "udp" ? "udp" : "http"); setLocalPort(next === "web" ? "3000" : next === "udp" ? "53" : "22"); }}><option value="tcp">TCP</option><option value="udp">UDP</option><option value="web">HTTP / HTTPS</option></select></label><label className="wide">名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === "web" ? "本地 Web 应用" : "生产环境 SSH"} required maxLength={80} /></label><label>本地地址<input value={host} onChange={(e) => setHost(e.target.value)} required /></label><label>本地端口<input type="number" min="1" max="65535" value={localPort} onChange={(e) => setLocalPort(e.target.value)} required /></label>{kind === "web" ? <><label>本地协议<select value={localScheme} onChange={(e)=>setLocalScheme(e.target.value as LocalScheme)}><option value="http">HTTP</option><option value="https">HTTPS（严格校验证书）</option></select></label><label>公网子域名<input value={hostname} onChange={(e)=>setHostname(e.target.value.toLowerCase())} placeholder="myapp" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /></label></> : <label className="wide">远程端口 <small>留空自动分配</small><input type="number" min="1" max="65535" value={remotePort} onChange={(e) => setRemotePort(e.target.value)} placeholder="自动" /></label>}</div>
     {!isLoopback && <label className="confirm"><input type="checkbox" checked={lanConfirmed} onChange={(e) => setLanConfirmed(e.target.checked)} /><span><strong>允许访问局域网目标</strong>客户端将能连接到这台 Mac 可访问的远程主机。</span></label>}
     <fieldset><legend>公网访问策略</legend><button type="button" className={`mode-card ${mode === "allowlist" ? "selected" : ""}`} onClick={() => setMode("allowlist")}><ShieldCheck /><span><strong>IP 白名单</strong><small>仅允许指定来源网络</small></span></button><button type="button" className={`mode-card danger ${mode === "public" ? "selected" : ""}`} onClick={() => setMode("public")}><Network /><span><strong>公开访问</strong><small>允许任意来源建立连接</small></span></button></fieldset>
     {mode === "allowlist" ? <label>允许的 CIDR<textarea value={cidrs} onChange={(e) => setCidrs(e.target.value)} placeholder={"203.0.113.8/32\n2001:db8::/48"} required /></label> : <label className="confirm danger"><input type="checkbox" checked={publicConfirmed} onChange={(e) => setPublicConfirmed(e.target.checked)} /><span><strong>我了解公开暴露的风险</strong>目标服务必须配置可靠的身份认证。</span></label>}

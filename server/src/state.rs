@@ -6,12 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::extract::ws::WebSocket;
 use dashmap::DashMap;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tunnelbridge_protocol::{ActiveConnection, AgentControlMessage, MetricsSnapshot};
+use tunnelbridge_protocol::{
+    ActiveConnection, ActiveTransport, AgentControlMessage, MetricsSnapshot,
+};
 use uuid::Uuid;
 
 use crate::{config::Config, geoip::GeoIpResolver};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub login_attempts: DashMap<String, LoginWindow>,
     pub agents: DashMap<Uuid, AgentPeer>,
     pub pending: DashMap<Uuid, PendingConnection>,
+    pub streams: DashMap<Uuid, mpsc::Sender<InboundCarrierFrame>>,
     pub listeners: DashMap<Uuid, CancellationToken>,
     pub active: DashMap<Uuid, ActiveConnection>,
     pub counters: Counters,
@@ -41,6 +43,7 @@ impl AppState {
             login_attempts: DashMap::new(),
             agents: DashMap::new(),
             pending: DashMap::new(),
+            streams: DashMap::new(),
             listeners: DashMap::new(),
             active: DashMap::new(),
             counters: Counters::default(),
@@ -56,6 +59,12 @@ impl AppState {
             bytes_down: self.counters.bytes_down.load(Ordering::Relaxed),
             rejected_connections: self.counters.rejected.load(Ordering::Relaxed),
             failed_connections: self.counters.failed.load(Ordering::Relaxed),
+            carrier_sessions: self.agents.len() as u64,
+            active_udp_sessions: self.counters.active_udp.load(Ordering::Relaxed),
+            http_requests: self.counters.http_requests.load(Ordering::Relaxed),
+            quic_connections: self.counters.quic.load(Ordering::Relaxed),
+            kcp_connections: self.counters.kcp.load(Ordering::Relaxed),
+            wss_connections: self.counters.wss.load(Ordering::Relaxed),
         }
     }
 }
@@ -75,13 +84,21 @@ pub struct PendingConnection {
     pub agent_id: Uuid,
     pub ticket_hash: String,
     pub expires_at: Instant,
-    pub socket_tx: oneshot::Sender<WebSocket>,
+    pub ack_tx: oneshot::Sender<Result<(), String>>,
+}
+
+#[derive(Debug)]
+pub struct InboundCarrierFrame {
+    pub kind: u8,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Clone)]
 pub struct AgentPeer {
     pub session_id: Uuid,
     pub sender: mpsc::UnboundedSender<AgentControlMessage>,
+    pub binary_sender: mpsc::Sender<Vec<u8>>,
+    pub transport: ActiveTransport,
     pub cancellation: CancellationToken,
 }
 
@@ -91,6 +108,11 @@ pub struct Counters {
     pub bytes_down: AtomicU64,
     pub rejected: AtomicU64,
     pub failed: AtomicU64,
+    pub active_udp: AtomicU64,
+    pub http_requests: AtomicU64,
+    pub quic: AtomicU64,
+    pub kcp: AtomicU64,
+    pub wss: AtomicU64,
 }
 
 impl Counters {

@@ -14,15 +14,26 @@ chrono.workspace = true
 dashmap = "6.1"
 futures-util.workspace = true
 http.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1.8", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+hex.workspace = true
 ipnet.workspace = true
 rand.workspace = true
+quinn.workspace = true
+kcp-tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rcgen = "0.14"
+rustls.workspace = true
+rustls-pemfile.workspace = true
+sha2.workspace = true
 socket2 = { version = "0.6", features = ["all"] }
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["compression-gzip", "fs", "limit", "trace"] }
 tracing.workspace = true

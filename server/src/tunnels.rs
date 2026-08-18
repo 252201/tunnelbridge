@@ -3,7 +3,8 @@ use std::{net::IpAddr, str::FromStr};
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use tunnelbridge_protocol::{
-    AccessMode, CreateTunnelRequest, Tunnel, TunnelStatus, UpdateTunnelRequest,
+    AccessMode, CreateTunnelRequest, LocalScheme, Tunnel, TunnelKind, TunnelStatus,
+    UpdateTunnelRequest,
 };
 use uuid::Uuid;
 
@@ -33,18 +34,50 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Tunnel, AppError> {
     row_to_tunnel(row)
 }
 
+pub async fn get_by_hostname(pool: &SqlitePool, hostname: &str) -> Result<Tunnel, AppError> {
+    let row = sqlx::query(
+        "SELECT * FROM tunnels WHERE kind = 'web' AND enabled = 1 AND lower(hostname) = lower(?)",
+    )
+    .bind(hostname.trim_end_matches('.'))
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    row_to_tunnel(row)
+}
+
+pub async fn hostname_is_enabled(pool: &SqlitePool, hostname: &str) -> Result<bool, AppError> {
+    let count: i64 = sqlx::query(
+        "SELECT COUNT(*) AS count FROM tunnels WHERE kind = 'web' AND enabled = 1 AND lower(hostname) = lower(?)",
+    )
+    .bind(hostname.trim_end_matches('.'))
+    .fetch_one(pool)
+    .await?
+    .get("count");
+    Ok(count == 1)
+}
+
 pub async fn create(
     state: &SharedState,
     agent_id: Uuid,
     request: CreateTunnelRequest,
 ) -> Result<Tunnel, AppError> {
     validate_create(state, &request)?;
-    let remote_port = match request.remote_port {
-        Some(port) => {
-            validate_remote_port(state, port)?;
-            port
-        }
-        None => allocate_port(state).await?,
+    let remote_port = match request.kind {
+        TunnelKind::Tcp | TunnelKind::Udp => Some(match request.remote_port {
+            Some(port) => {
+                validate_remote_port(state, port)?;
+                port
+            }
+            None => allocate_port(state, request.kind).await?,
+        }),
+        TunnelKind::Web => None,
+    };
+    let hostname = match request.kind {
+        TunnelKind::Web => Some(normalize_hostname(
+            state,
+            request.hostname.as_deref().unwrap_or(request.name.as_str()),
+        )?),
+        _ => None,
     };
     let now = Utc::now();
     let tunnel = Tunnel {
@@ -53,7 +86,10 @@ pub async fn create(
         name: request.name.trim().to_owned(),
         local_host: request.local_host.trim().to_owned(),
         local_port: request.local_port,
+        kind: request.kind,
+        local_scheme: request.local_scheme,
         remote_port,
+        hostname,
         access_mode: request.access_mode,
         allowed_cidrs: request.allowed_cidrs,
         enabled: request.enabled,
@@ -65,15 +101,19 @@ pub async fn create(
         serde_json::to_string(&tunnel.allowed_cidrs).map_err(|e| AppError::Internal(e.into()))?;
     let result = sqlx::query(
         r#"INSERT INTO tunnels
-        (id, agent_id, name, local_host, local_port, remote_port, access_mode, allowed_cidrs, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        (id, agent_id, name, local_host, local_port, kind, local_scheme, remote_port, hostname,
+         access_mode, allowed_cidrs, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(tunnel.id.to_string())
     .bind(agent_id.to_string())
     .bind(&tunnel.name)
     .bind(&tunnel.local_host)
     .bind(i64::from(tunnel.local_port))
-    .bind(i64::from(tunnel.remote_port))
+    .bind(kind_str(tunnel.kind))
+    .bind(scheme_str(tunnel.local_scheme))
+    .bind(tunnel.remote_port.map(i64::from))
+    .bind(&tunnel.hostname)
     .bind(access_mode_str(tunnel.access_mode))
     .bind(cidrs)
     .bind(tunnel.enabled)
@@ -84,7 +124,7 @@ pub async fn create(
     match result {
         Ok(_) => Ok(tunnel),
         Err(sqlx::Error::Database(error)) if error.is_unique_violation() => Err(
-            AppError::Conflict(format!("remote port {remote_port} is already allocated")),
+            AppError::Conflict("public endpoint is already allocated".into()),
         ),
         Err(error) => Err(error.into()),
     }
@@ -114,8 +154,31 @@ pub async fn update(
         tunnel.local_port = port;
     }
     if let Some(port) = request.remote_port {
+        if tunnel.kind == TunnelKind::Web {
+            return Err(AppError::BadRequest(
+                "web tunnels do not use a remote port".into(),
+            ));
+        }
         validate_remote_port(state, port)?;
-        tunnel.remote_port = port;
+        tunnel.remote_port = Some(port);
+    }
+    if let Some(kind) = request.kind
+        && kind != tunnel.kind
+    {
+        return Err(AppError::BadRequest(
+            "tunnel kind cannot be changed after creation".into(),
+        ));
+    }
+    if let Some(scheme) = request.local_scheme {
+        tunnel.local_scheme = scheme;
+    }
+    if let Some(hostname) = request.hostname {
+        if tunnel.kind != TunnelKind::Web {
+            return Err(AppError::BadRequest(
+                "only web tunnels have hostnames".into(),
+            ));
+        }
+        tunnel.hostname = Some(normalize_hostname(state, &hostname)?);
     }
     if let Some(mode) = request.access_mode {
         tunnel.access_mode = mode;
@@ -131,13 +194,16 @@ pub async fn update(
     let cidrs =
         serde_json::to_string(&tunnel.allowed_cidrs).map_err(|e| AppError::Internal(e.into()))?;
     let result = sqlx::query(
-        r#"UPDATE tunnels SET name = ?, local_host = ?, local_port = ?, remote_port = ?,
-        access_mode = ?, allowed_cidrs = ?, enabled = ?, updated_at = ? WHERE id = ?"#,
+        r#"UPDATE tunnels SET name = ?, local_host = ?, local_port = ?, local_scheme = ?,
+        remote_port = ?, hostname = ?, access_mode = ?, allowed_cidrs = ?, enabled = ?,
+        updated_at = ? WHERE id = ?"#,
     )
     .bind(&tunnel.name)
     .bind(&tunnel.local_host)
     .bind(i64::from(tunnel.local_port))
-    .bind(i64::from(tunnel.remote_port))
+    .bind(scheme_str(tunnel.local_scheme))
+    .bind(tunnel.remote_port.map(i64::from))
+    .bind(&tunnel.hostname)
     .bind(access_mode_str(tunnel.access_mode))
     .bind(cidrs)
     .bind(tunnel.enabled)
@@ -183,10 +249,12 @@ pub fn source_allowed(tunnel: &Tunnel, address: IpAddr) -> bool {
     }
 }
 
-async fn allocate_port(state: &SharedState) -> Result<u16, AppError> {
-    let rows = sqlx::query("SELECT remote_port FROM tunnels")
-        .fetch_all(&state.db)
-        .await?;
+async fn allocate_port(state: &SharedState, kind: TunnelKind) -> Result<u16, AppError> {
+    let rows =
+        sqlx::query("SELECT remote_port FROM tunnels WHERE kind = ? AND remote_port IS NOT NULL")
+            .bind(kind_str(kind))
+            .fetch_all(&state.db)
+            .await?;
     let used = rows
         .into_iter()
         .map(|row| row.get::<i64, _>("remote_port") as u16)
@@ -209,6 +277,17 @@ fn validate_create(state: &SharedState, request: &CreateTunnelRequest) -> Result
     if let Some(port) = request.remote_port {
         validate_remote_port(state, port)?;
     }
+    validate_kind_scheme(request.kind, request.local_scheme)?;
+    if request.kind == TunnelKind::Web {
+        normalize_hostname(
+            state,
+            request.hostname.as_deref().unwrap_or(request.name.as_str()),
+        )?;
+    } else if request.hostname.is_some() {
+        return Err(AppError::BadRequest(
+            "only web tunnels may specify a hostname".into(),
+        ));
+    }
     if request.access_mode == AccessMode::Allowlist && request.allowed_cidrs.is_empty() {
         return Err(AppError::BadRequest(
             "allowlist mode requires at least one CIDR".into(),
@@ -228,7 +307,59 @@ fn validate_tunnel(tunnel: &Tunnel) -> Result<(), AppError> {
             "allowlist mode requires at least one CIDR".into(),
         ));
     }
+    validate_kind_scheme(tunnel.kind, tunnel.local_scheme)?;
+    match tunnel.kind {
+        TunnelKind::Tcp | TunnelKind::Udp if tunnel.remote_port.is_none() => {
+            return Err(AppError::BadRequest(
+                "port tunnel requires remote_port".into(),
+            ));
+        }
+        TunnelKind::Web if tunnel.hostname.is_none() => {
+            return Err(AppError::BadRequest("web tunnel requires hostname".into()));
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+fn validate_kind_scheme(kind: TunnelKind, scheme: LocalScheme) -> Result<(), AppError> {
+    let valid = matches!(
+        (kind, scheme),
+        (TunnelKind::Tcp, LocalScheme::Tcp)
+            | (TunnelKind::Udp, LocalScheme::Udp)
+            | (TunnelKind::Web, LocalScheme::Http | LocalScheme::Https)
+    );
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "local scheme is incompatible with tunnel kind".into(),
+        ))
+    }
+}
+
+fn normalize_hostname(state: &SharedState, value: &str) -> Result<String, AppError> {
+    let value = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    let slug = if value.ends_with(&format!(".{}", state.config.web_base_domain)) {
+        value
+            .strip_suffix(&format!(".{}", state.config.web_base_domain))
+            .unwrap_or(&value)
+    } else {
+        value.as_str()
+    };
+    if slug.is_empty()
+        || slug.len() > 63
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+        || !slug.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+    {
+        return Err(AppError::BadRequest(
+            "hostname must be a DNS label containing letters, digits, or hyphens".into(),
+        ));
+    }
+    Ok(format!("{slug}.{}", state.config.web_base_domain))
 }
 
 fn validate_local_host(host: &str, allow_lan: bool) -> Result<(), AppError> {
@@ -275,7 +406,12 @@ fn row_to_tunnel(row: SqliteRow) -> Result<Tunnel, AppError> {
         name: row.get("name"),
         local_host: row.get("local_host"),
         local_port: row.get::<i64, _>("local_port") as u16,
-        remote_port: row.get::<i64, _>("remote_port") as u16,
+        kind: parse_kind(&row.get::<String, _>("kind"))?,
+        local_scheme: parse_scheme(&row.get::<String, _>("local_scheme"))?,
+        remote_port: row
+            .get::<Option<i64>, _>("remote_port")
+            .map(|port| port as u16),
+        hostname: row.get("hostname"),
         access_mode,
         allowed_cidrs: serde_json::from_str(&row.get::<String, _>("allowed_cidrs"))
             .map_err(|error| AppError::Internal(error.into()))?,
@@ -301,6 +437,42 @@ fn access_mode_str(mode: AccessMode) -> &'static str {
     }
 }
 
+fn kind_str(kind: TunnelKind) -> &'static str {
+    match kind {
+        TunnelKind::Tcp => "tcp",
+        TunnelKind::Udp => "udp",
+        TunnelKind::Web => "web",
+    }
+}
+
+fn scheme_str(scheme: LocalScheme) -> &'static str {
+    match scheme {
+        LocalScheme::Tcp => "tcp",
+        LocalScheme::Udp => "udp",
+        LocalScheme::Http => "http",
+        LocalScheme::Https => "https",
+    }
+}
+
+fn parse_kind(value: &str) -> Result<TunnelKind, AppError> {
+    match value {
+        "tcp" => Ok(TunnelKind::Tcp),
+        "udp" => Ok(TunnelKind::Udp),
+        "web" => Ok(TunnelKind::Web),
+        _ => Err(AppError::Internal(anyhow::anyhow!("invalid tunnel kind"))),
+    }
+}
+
+fn parse_scheme(value: &str) -> Result<LocalScheme, AppError> {
+    match value {
+        "tcp" => Ok(LocalScheme::Tcp),
+        "udp" => Ok(LocalScheme::Udp),
+        "http" => Ok(LocalScheme::Http),
+        "https" => Ok(LocalScheme::Https),
+        _ => Err(AppError::Internal(anyhow::anyhow!("invalid local scheme"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,7 +486,10 @@ mod tests {
             name: "test".into(),
             local_host: "127.0.0.1".into(),
             local_port: 22,
-            remote_port: 20000,
+            kind: TunnelKind::Tcp,
+            local_scheme: LocalScheme::Tcp,
+            remote_port: Some(20000),
+            hostname: None,
             access_mode: mode,
             allowed_cidrs: cidrs,
             enabled: true,

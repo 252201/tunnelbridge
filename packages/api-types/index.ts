@@ -1,5 +1,9 @@
 export type AccessMode = "allowlist" | "public";
 export type TunnelStatus = "stopped" | "starting" | "online" | "agent_offline" | "error";
+export type TunnelKind = "tcp" | "udp" | "web";
+export type LocalScheme = "tcp" | "udp" | "http" | "https";
+export type TransportMode = "auto" | "quic" | "kcp" | "wss";
+export type ActiveTransport = "quic" | "kcp" | "wss";
 
 export interface Tunnel {
   id: string;
@@ -7,7 +11,10 @@ export interface Tunnel {
   name: string;
   local_host: string;
   local_port: number;
-  remote_port: number;
+  kind: TunnelKind;
+  local_scheme: LocalScheme;
+  remote_port: number | null;
+  hostname: string | null;
   access_mode: AccessMode;
   allowed_cidrs: string[];
   enabled: boolean;
@@ -20,7 +27,10 @@ export interface CreateTunnelRequest {
   name: string;
   local_host: string;
   local_port: number;
+  kind: TunnelKind;
+  local_scheme: LocalScheme;
   remote_port?: number;
+  hostname?: string;
   access_mode: AccessMode;
   allowed_cidrs: string[];
   enabled: boolean;
@@ -31,7 +41,10 @@ export interface UpdateTunnelRequest {
   name?: string;
   local_host?: string;
   local_port?: number;
+  kind?: TunnelKind;
+  local_scheme?: LocalScheme;
   remote_port?: number;
+  hostname?: string;
   access_mode?: AccessMode;
   allowed_cidrs?: string[];
   enabled?: boolean;
@@ -67,6 +80,8 @@ export interface ActiveConnection {
   opened_at: string;
   bytes_up: number;
   bytes_down: number;
+  tunnel_kind: TunnelKind;
+  transport?: ActiveTransport | null;
 }
 
 export interface AuditEntry {
@@ -84,6 +99,12 @@ export interface MetricsSnapshot {
   bytes_down: number;
   rejected_connections: number;
   failed_connections: number;
+  carrier_sessions: number;
+  active_udp_sessions: number;
+  http_requests: number;
+  quic_connections: number;
+  kcp_connections: number;
+  wss_connections: number;
 }
 
 export interface ApiError {

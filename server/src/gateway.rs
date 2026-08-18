@@ -4,24 +4,23 @@ use std::{
 };
 
 use anyhow::Context;
-use axum::extract::ws::{Message, WebSocket};
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 use tunnelbridge_protocol::{
-    ActiveConnection, AgentControlMessage, DATA_FRAME_BYTES, DATA_FRAME_EOF, Tunnel,
+    ActiveConnection, AgentControlMessage, CARRIER_FRAME_DATA, CARRIER_FRAME_FIN,
+    CARRIER_FRAME_RESET, Tunnel, TunnelKind, encode_carrier_frame,
 };
 use uuid::Uuid;
 
 use crate::{
     auth::{hash_token, random_secret},
-    state::{PendingConnection, SharedState},
+    state::{InboundCarrierFrame, PendingConnection, SharedState},
     tunnels,
 };
 
@@ -30,7 +29,7 @@ pub async fn restore_listeners(state: &SharedState) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e))?
     {
-        if tunnel.enabled {
+        if tunnel.enabled && tunnel.kind != TunnelKind::Web {
             start_listener(state.clone(), tunnel).await;
         }
     }
@@ -39,7 +38,7 @@ pub async fn restore_listeners(state: &SharedState) -> anyhow::Result<()> {
 
 pub async fn reconcile_listener(state: SharedState, tunnel: Tunnel) {
     stop_listener(&state, tunnel.id);
-    if tunnel.enabled {
+    if tunnel.enabled && tunnel.kind != TunnelKind::Web {
         tokio::time::sleep(Duration::from_millis(25)).await;
         start_listener(state, tunnel).await;
     }
@@ -63,13 +62,20 @@ pub async fn sync_agent(state: &SharedState, agent_id: Uuid) {
 }
 
 async fn start_listener(state: SharedState, tunnel: Tunnel) {
+    if tunnel.kind != TunnelKind::Tcp {
+        start_udp_listener(state, tunnel).await;
+        return;
+    }
     let cancellation = CancellationToken::new();
     state.listeners.insert(tunnel.id, cancellation.clone());
     tokio::spawn(async move {
-        let listener = match bind_dual_stack(tunnel.remote_port) {
+        let Some(remote_port) = tunnel.remote_port else {
+            return;
+        };
+        let listener = match bind_dual_stack(remote_port) {
             Ok(listener) => listener,
             Err(error) => {
-                tracing::error!(tunnel_id = %tunnel.id, port = tunnel.remote_port, error = %error, "failed to bind tunnel listener");
+                tracing::error!(tunnel_id = %tunnel.id, port = remote_port, error = %error, "failed to bind tunnel listener");
                 state.listeners.remove(&tunnel.id);
                 state
                     .counters
@@ -78,7 +84,7 @@ async fn start_listener(state: SharedState, tunnel: Tunnel) {
                 return;
             }
         };
-        tracing::info!(tunnel_id = %tunnel.id, port = tunnel.remote_port, "tunnel listener online");
+        tracing::info!(tunnel_id = %tunnel.id, port = remote_port, "tunnel listener online");
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
@@ -137,14 +143,16 @@ async fn accept_public_connection(
     let peer_location = state.geoip.lookup(peer.ip()).await;
     let connection_id = Uuid::new_v4();
     let ticket = random_secret(32);
-    let (socket_tx, socket_rx) = oneshot::channel();
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let (frame_tx, frame_rx) = mpsc::channel(64);
+    state.streams.insert(connection_id, frame_tx);
     state.pending.insert(
         connection_id,
         PendingConnection {
             agent_id: tunnel.agent_id,
             ticket_hash: hash_token(&ticket),
             expires_at: Instant::now() + state.config.ticket_ttl,
-            socket_tx,
+            ack_tx,
         },
     );
     let expires_at = Utc::now()
@@ -161,17 +169,23 @@ async fn accept_public_connection(
             expires_at,
         })
         .context("send open connection to agent")?;
-    let websocket = match tokio::time::timeout(state.config.connect_timeout, socket_rx).await {
-        Ok(Ok(socket)) => socket,
+    match tokio::time::timeout(state.config.connect_timeout, ack_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            state.pending.remove(&connection_id);
+            state.streams.remove(&connection_id);
+            anyhow::bail!("agent rejected connection: {error}");
+        }
         _ => {
             state.pending.remove(&connection_id);
+            state.streams.remove(&connection_id);
             state
                 .counters
                 .failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            anyhow::bail!("agent data channel timed out");
+            anyhow::bail!("agent multiplexed stream timed out");
         }
-    };
+    }
     let active = ActiveConnection {
         id: connection_id,
         tunnel_id: tunnel.id,
@@ -180,9 +194,19 @@ async fn accept_public_connection(
         opened_at: Utc::now(),
         bytes_up: 0,
         bytes_down: 0,
+        tunnel_kind: tunnel.kind,
+        transport: Some(agent.transport),
     };
     state.active.insert(connection_id, active);
-    let result = bridge(state.clone(), connection_id, tcp, websocket).await;
+    let result = bridge(
+        state.clone(),
+        connection_id,
+        tcp,
+        agent.binary_sender.clone(),
+        frame_rx,
+    )
+    .await;
+    state.streams.remove(&connection_id);
     if let Some((_, summary)) = state.active.remove(&connection_id)
         && let Err(error) = sqlx::query(
             r#"INSERT INTO connection_history
@@ -204,33 +228,62 @@ async fn accept_public_connection(
     result
 }
 
-pub fn claim_data_channel(
+pub fn acknowledge_connection(
     state: &SharedState,
     connection_id: Uuid,
     agent_id: Uuid,
-    ticket: &str,
-) -> Option<oneshot::Sender<WebSocket>> {
+    ticket: Option<&str>,
+    accepted: bool,
+    error: Option<String>,
+) -> bool {
     {
-        let pending = state.pending.get(&connection_id)?;
+        let Some(pending) = state.pending.get(&connection_id) else {
+            return false;
+        };
         if pending.agent_id != agent_id
             || pending.expires_at <= Instant::now()
-            || pending.ticket_hash != hash_token(ticket)
+            || ticket.is_none_or(|ticket| pending.ticket_hash != hash_token(ticket))
         {
-            return None;
+            return false;
         }
     }
-    let pending = state.pending.remove(&connection_id)?.1;
-    Some(pending.socket_tx)
+    let Some((_, pending)) = state.pending.remove(&connection_id) else {
+        return false;
+    };
+    let _ = pending.ack_tx.send(if accepted {
+        Ok(())
+    } else {
+        Err(error.unwrap_or_else(|| "local target rejected connection".into()))
+    });
+    true
 }
 
-async fn bridge(
+pub async fn route_carrier_frame(state: &SharedState, frame: &[u8]) {
+    let Some((kind, id, payload)) = tunnelbridge_protocol::decode_carrier_frame(frame) else {
+        return;
+    };
+    if let Some(sender) = state.streams.get(&id) {
+        let _ = sender
+            .send(InboundCarrierFrame {
+                kind,
+                payload: payload.to_vec(),
+            })
+            .await;
+    }
+}
+
+async fn bridge<S>(
     state: SharedState,
     connection_id: Uuid,
-    tcp: TcpStream,
-    websocket: WebSocket,
-) -> anyhow::Result<()> {
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-    let (mut ws_write, mut ws_read) = websocket.split();
+    tcp: S,
+    carrier: mpsc::Sender<Vec<u8>>,
+    mut inbound: mpsc::Receiver<InboundCarrierFrame>,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut tcp_read, mut tcp_write) = tokio::io::split(tcp);
+    let upstream_carrier = carrier.clone();
     let upstream = async {
         let mut buffer = vec![0_u8; 32 * 1024];
         loop {
@@ -238,15 +291,18 @@ async fn bridge(
                 .await
                 .context("connection idle timeout")??;
             if count == 0 {
-                ws_write
-                    .send(Message::Binary(vec![DATA_FRAME_EOF].into()))
+                upstream_carrier
+                    .send(encode_carrier_frame(CARRIER_FRAME_FIN, connection_id, &[]))
                     .await?;
                 break;
             }
-            let mut frame = Vec::with_capacity(count + 1);
-            frame.push(DATA_FRAME_BYTES);
-            frame.extend_from_slice(&buffer[..count]);
-            ws_write.send(Message::Binary(frame.into())).await?;
+            upstream_carrier
+                .send(encode_carrier_frame(
+                    CARRIER_FRAME_DATA,
+                    connection_id,
+                    &buffer[..count],
+                ))
+                .await?;
             state.counters.add_down(count as u64);
             if let Some(mut active) = state.active.get_mut(&connection_id) {
                 active.bytes_down += count as u64;
@@ -256,23 +312,23 @@ async fn bridge(
     };
     let downstream = async {
         loop {
-            let message = tokio::time::timeout(state.config.idle_timeout, ws_read.next())
+            let message = tokio::time::timeout(state.config.idle_timeout, inbound.recv())
                 .await
                 .context("connection idle timeout")?;
             let Some(message) = message else { break };
-            match message? {
-                Message::Binary(frame) if frame.first() == Some(&DATA_FRAME_BYTES) => {
-                    tcp_write.write_all(&frame[1..]).await?;
-                    state.counters.add_up((frame.len() - 1) as u64);
+            match message.kind {
+                CARRIER_FRAME_DATA => {
+                    tcp_write.write_all(&message.payload).await?;
+                    state.counters.add_up(message.payload.len() as u64);
                     if let Some(mut active) = state.active.get_mut(&connection_id) {
-                        active.bytes_up += (frame.len() - 1) as u64;
+                        active.bytes_up += message.payload.len() as u64;
                     }
                 }
-                Message::Binary(frame) if frame.first() == Some(&DATA_FRAME_EOF) => {
+                CARRIER_FRAME_FIN => {
                     tcp_write.shutdown().await?;
                     break;
                 }
-                Message::Close(_) => break,
+                CARRIER_FRAME_RESET => anyhow::bail!("agent reset stream"),
                 _ => {}
             }
         }
@@ -282,6 +338,97 @@ async fn bridge(
     up?;
     down?;
     Ok(())
+}
+
+pub async fn open_virtual_stream(
+    state: SharedState,
+    tunnel: Tunnel,
+    peer: SocketAddr,
+) -> anyhow::Result<tokio::io::DuplexStream> {
+    if !tunnels::source_allowed(&tunnel, peer.ip()) {
+        state
+            .counters
+            .rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        anyhow::bail!("source {} is not allowed", peer.ip());
+    }
+    let agent = state
+        .agents
+        .get(&tunnel.agent_id)
+        .map(|entry| entry.clone())
+        .context("agent is offline")?;
+    let connection_id = Uuid::new_v4();
+    let ticket = random_secret(32);
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let (frame_tx, frame_rx) = mpsc::channel(64);
+    state.streams.insert(connection_id, frame_tx);
+    state.pending.insert(
+        connection_id,
+        PendingConnection {
+            agent_id: tunnel.agent_id,
+            ticket_hash: hash_token(&ticket),
+            expires_at: Instant::now() + state.config.ticket_ttl,
+            ack_tx,
+        },
+    );
+    let peer_location = state.geoip.lookup(peer.ip()).await;
+    agent.sender.send(AgentControlMessage::OpenConnection {
+        connection_id,
+        tunnel: tunnel.clone(),
+        peer_addr: peer.to_string(),
+        peer_location: peer_location.clone(),
+        ticket,
+        expires_at: Utc::now()
+            + chrono::Duration::from_std(state.config.ticket_ttl)
+                .unwrap_or(chrono::Duration::seconds(15)),
+    })?;
+    match tokio::time::timeout(state.config.connect_timeout, ack_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        result => {
+            state.pending.remove(&connection_id);
+            state.streams.remove(&connection_id);
+            match result {
+                Ok(Ok(Err(error))) => anyhow::bail!(error),
+                _ => anyhow::bail!("web stream acknowledgement timed out"),
+            }
+        }
+    }
+    state.active.insert(
+        connection_id,
+        ActiveConnection {
+            id: connection_id,
+            tunnel_id: tunnel.id,
+            peer_addr: peer.to_string(),
+            peer_location,
+            opened_at: Utc::now(),
+            bytes_up: 0,
+            bytes_down: 0,
+            tunnel_kind: tunnel.kind,
+            transport: Some(agent.transport),
+        },
+    );
+    let (application, bridge_stream) = tokio::io::duplex(128 * 1024);
+    let bridge_state = state.clone();
+    tokio::spawn(async move {
+        let result = bridge(
+            bridge_state.clone(),
+            connection_id,
+            bridge_stream,
+            agent.binary_sender.clone(),
+            frame_rx,
+        )
+        .await;
+        bridge_state.streams.remove(&connection_id);
+        bridge_state.active.remove(&connection_id);
+        if let Err(error) = result {
+            tracing::debug!(connection_id = %connection_id, error = %error, "web stream closed");
+        }
+    });
+    Ok(application)
+}
+
+async fn start_udp_listener(state: SharedState, tunnel: Tunnel) {
+    crate::udp::start_listener(state, tunnel).await;
 }
 
 pub fn parse_forwarded_ip(value: Option<&str>) -> Option<IpAddr> {

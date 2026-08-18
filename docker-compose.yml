@@ -11,11 +11,20 @@ services:
       TB_PORT_END: ${TB_PORT_END:-20100}
       TB_AUDIT_RETENTION_DAYS: ${TB_AUDIT_RETENTION_DAYS:-30}
       TB_GEOIP_URL: ${TB_GEOIP_URL:-https://ipwho.is/{ip}}
+      TB_WEB_BASE_DOMAIN: ${TB_WEB_BASE_DOMAIN:-${TB_DOMAIN}}
+      TB_QUIC_PORT: ${TB_QUIC_PORT:-443}
+      TB_QUIC_LISTEN_PORT: 7443
+      TB_KCP_PORT: ${TB_KCP_PORT:-4000}
+      TB_UDP_SESSION_TIMEOUT_SECONDS: ${TB_UDP_SESSION_TIMEOUT_SECONDS:-60}
+      TB_TRUSTED_PROXY_CIDRS: ${TB_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
       RUST_LOG: ${RUST_LOG:-tunnelbridge_server=info}
     volumes:
       - tunnelbridge-data:/app/data
     ports:
       - "${TB_PORT_START:-20000}-${TB_PORT_END:-20100}:${TB_PORT_START:-20000}-${TB_PORT_END:-20100}"
+      - "${TB_PORT_START:-20000}-${TB_PORT_END:-20100}:${TB_PORT_START:-20000}-${TB_PORT_END:-20100}/udp"
+      - "${TB_QUIC_PORT:-443}:7443/udp"
+      - "${TB_KCP_PORT:-4000}:${TB_KCP_PORT:-4000}/udp"
     networks: [tunnelbridge]
 
   caddy:
@@ -28,7 +37,7 @@ services:
       TB_DOMAIN: ${TB_DOMAIN:?Set TB_DOMAIN to the relay domain}
     ports:
       - "80:80"
-      - "443:443"
+      - "443:443/tcp"
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

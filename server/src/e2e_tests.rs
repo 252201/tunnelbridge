@@ -13,7 +13,8 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use tunnelbridge_protocol::{
-    AccessMode, AgentControlMessage, CreateTunnelRequest, DATA_FRAME_BYTES, LoginResponse,
+    AccessMode, AgentControlMessage, CARRIER_FRAME_DATA, CreateTunnelRequest, LocalScheme,
+    LoginResponse, TunnelKind, decode_carrier_frame,
 };
 use uuid::Uuid;
 
@@ -40,7 +41,10 @@ async fn relays_real_tcp_bytes_through_authenticated_websockets() -> Result<()> 
             name: "echo".into(),
             local_host: "127.0.0.1".into(),
             local_port: 9,
+            kind: TunnelKind::Tcp,
+            local_scheme: LocalScheme::Tcp,
             remote_port: Some(public_port),
+            hostname: None,
             access_mode: AccessMode::Public,
             allowed_cidrs: vec![],
             enabled: true,
@@ -63,7 +67,7 @@ async fn relays_real_tcp_bytes_through_authenticated_websockets() -> Result<()> 
     });
 
     let mut control_request =
-        format!("ws://{http_addr}/api/v1/agent/control").into_client_request()?;
+        format!("ws://{http_addr}/api/v2/agent/carrier").into_client_request()?;
     control_request.headers_mut().insert(
         http::header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}"))?,
@@ -73,28 +77,39 @@ async fn relays_real_tcp_bytes_through_authenticated_websockets() -> Result<()> 
 
     let mut public = connect_with_retry(public_port).await?;
     let (connection_id, ticket) = wait_for_open(&mut control).await?;
-    let mut data_request =
-        format!("ws://{http_addr}/api/v1/agent/data/{connection_id}").into_client_request()?;
-    data_request.headers_mut().insert(
-        http::header::AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {token}"))?,
-    );
-    data_request
-        .headers_mut()
-        .insert("x-tunnel-ticket", HeaderValue::from_str(&ticket)?);
-    let (mut data, _) = connect_async(data_request).await?;
+    control
+        .send(Message::Text(
+            serde_json::to_string(&AgentControlMessage::ConnectionAck {
+                connection_id,
+                accepted: true,
+                error: None,
+                ticket: Some(ticket.clone()),
+            })?
+            .into(),
+        ))
+        .await?;
 
     public.write_all(b"tunnelbridge").await?;
-    let frame = tokio::time::timeout(Duration::from_secs(2), data.next())
+    let frame = tokio::time::timeout(Duration::from_secs(2), control.next())
         .await
-        .context("data channel did not receive public bytes")?
-        .context("data channel closed")??;
+        .context("carrier did not receive public bytes")?
+        .context("carrier closed")??;
     let Message::Binary(frame) = frame else {
         anyhow::bail!("expected binary data frame")
     };
-    assert_eq!(frame.first(), Some(&DATA_FRAME_BYTES));
-    assert_eq!(&frame[1..], b"tunnelbridge");
-    data.send(Message::Binary(frame)).await?;
+    let (kind, id, payload) = decode_carrier_frame(&frame).context("invalid carrier frame")?;
+    assert_eq!(kind, CARRIER_FRAME_DATA);
+    assert_eq!(id, connection_id);
+    assert_eq!(payload, b"tunnelbridge");
+    assert!(!gateway::acknowledge_connection(
+        &state,
+        connection_id,
+        agent_id,
+        Some(&ticket),
+        true,
+        None,
+    ));
+    control.send(Message::Binary(frame)).await?;
 
     let mut echoed = [0_u8; 12];
     tokio::time::timeout(Duration::from_secs(2), public.read_exact(&mut echoed)).await??;
@@ -233,6 +248,13 @@ fn test_config(database: PathBuf, port: u16) -> Config {
         audit_retention_days: 30,
         secure_cookies: false,
         geoip_url: "off".into(),
+        web_base_domain: "tunnel.test".into(),
+        quic_port: 443,
+        quic_listen_port: 7443,
+        kcp_port: 4000,
+        udp_session_timeout: Duration::from_secs(2),
+        transport_cert_dir: database.parent().unwrap().join("transport"),
+        trusted_proxy_cidrs: vec!["127.0.0.0/8".parse().unwrap()],
     }
 }
 

@@ -5,8 +5,12 @@ mod db;
 mod error;
 mod gateway;
 mod geoip;
+mod kcp;
+mod quic;
 mod state;
+mod transport_identity;
 mod tunnels;
+mod udp;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -19,7 +23,6 @@ use config::Config;
 use state::AppState;
 use tower_http::{
     compression::CompressionLayer,
-    limit::RequestBodyLimitLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -37,9 +40,12 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
+    transport_identity::initialize(&config)?;
     let db = db::connect(&config).await?;
     let state = AppState::new(config.clone(), db);
     gateway::restore_listeners(&state).await?;
+    tokio::spawn(quic::serve(state.clone()));
+    tokio::spawn(kcp::serve(state.clone()));
     tokio::spawn(api::cleanup(state.clone()));
 
     let mut app = Router::new().merge(api::router(state));
@@ -50,7 +56,6 @@ async fn main() -> Result<()> {
         );
     }
     let app = app
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
