@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly IMAGE_REPOSITORY="ghcr.io/252201/tunnelbridge-server"
-readonly DEFAULT_VERSION="v0.2.0"
+readonly DEFAULT_VERSION="v0.2.1"
 readonly DEFAULT_SSH_PORT="22"
 readonly DEFAULT_SSH_USER="ubuntu"
 readonly DEFAULT_PORT_START="20000"
@@ -62,7 +62,7 @@ usage() {
   TB_SSH_KEY            SSH 私钥路径
   CLOUDFLARE_API_TOKEN  Cloudflare API Token
   TB_DOMAIN             公网域名
-  TB_VERSION            镜像标签，默认 v0.2.0
+  TB_VERSION            镜像标签，默认 v0.2.1
   TB_PORT_START         TCP/UDP 端口池起始值，默认 20000
   TB_PORT_END           TCP/UDP 端口池结束值，默认 20100
   TB_QUIC_PORT          QUIC 公网 UDP 端口，默认 443
@@ -748,9 +748,18 @@ EOF
 set -eu
 if [ "${REPLACE_NGINX}" = 1 ]; then
   if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl disable --now nginx
-  else
-    sudo nginx -s stop
+    sudo systemctl disable nginx >/dev/null 2>&1 || true
+    sudo systemctl stop nginx >/dev/null 2>&1 || true
+  fi
+  sudo service nginx stop >/dev/null 2>&1 || true
+  if [ -x /etc/init.d/nginx ]; then sudo /etc/init.d/nginx stop >/dev/null 2>&1 || true; fi
+  for i in \$(seq 1 15); do
+    if ! ss -ltn 2>/dev/null | awk 'NR > 1 {print \$4}' | grep -Eq '(:80|:443)$'; then break; fi
+    sleep 1
+  done
+  if ss -ltn 2>/dev/null | awk 'NR > 1 {print \$4}' | grep -Eq '(:80|:443)$'; then
+    echo 'Nginx 停止后 80/443 仍被占用' >&2
+    exit 1
   fi
 fi
 sudo install -d -m 0750 ${REMOTE_ROOT}/caddy-data ${REMOTE_ROOT}/caddy-config

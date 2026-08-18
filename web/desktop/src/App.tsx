@@ -301,7 +301,7 @@ function SettingsView({ snapshot, onReconnect, onNotice }: { snapshot: AppSnapsh
       <div className="panel settings-card"><Server /><div><h2>中继服务器</h2><p>{snapshot.server_url ?? "尚未配置"}</p><small>设备令牌已存入 macOS 钥匙串，不会显示在界面中。</small></div><button className="secondary" onClick={onReconnect}>{snapshot.configured ? "重新配置" : "连接"}</button></div>
       <div className="panel settings-card"><Network /><div><h2>承载协议</h2><p>当前：{snapshot.active_transport?.toUpperCase() ?? "未连接"}</p><small>{snapshot.transport_fallback_reason ?? "自动模式优先 QUIC，失败后回退 WSS；KCP 需手动选择。"}</small></div><select value={snapshot.transport_mode ?? "auto"} onChange={(e)=>void changeTransport(e.target.value as TransportMode)}><option value="auto">自动</option><option value="quic">QUIC</option><option value="kcp">KCP</option><option value="wss">WSS</option></select></div>
       <div className="panel settings-card"><Power /><div><h2>登录时启动</h2><p>开机后在菜单栏运行 TunnelBridge</p><small>默认关闭，隧道只会在应用运行时保持连接。</small></div><button className={`switch ${autostart ? "on" : ""}`} role="switch" aria-checked={autostart} onClick={toggleAutostart}><span /></button></div>
-      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.0</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
+      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.1</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
     </div>
   </div>;
 }

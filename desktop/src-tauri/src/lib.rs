@@ -15,6 +15,7 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
