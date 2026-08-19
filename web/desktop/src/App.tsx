@@ -1,10 +1,10 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AccessMode, ActiveTransport, CreateTunnelRequest, GeoLocation, LocalScheme, MetricsSnapshot, Tunnel, TunnelKind, TransportMode } from "@tunnelbridge/api-types";
+import type { AccessMode, ActiveTransport, CreateTunnelRequest, GeoLocation, LocalScheme, MetricsSnapshot, Tunnel, TunnelKind, TransportMode, UpdateTunnelRequest } from "@tunnelbridge/api-types";
 import ipaddr from "ipaddr.js";
 import {
   Activity, ArrowDownToLine, ArrowUpFromLine, Cable, Check, ChevronRight,
-  CircleDot, Copy, Gauge, KeyRound, Network, Plus, Power, RefreshCw,
+  CircleDot, Copy, Gauge, KeyRound, Network, Pencil, Plus, Power, RefreshCw,
   Server, Settings, ShieldCheck, Trash2, X,
 } from "lucide-react";
 
@@ -56,8 +56,35 @@ function formatBytes(value: number) {
   return `${(value / 1024 ** 3).toFixed(2)} GB`;
 }
 
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Tauri WebView can expose the Clipboard API without granting it write access.
+      // Fall through to the DOM copy path in that case.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("clipboard copy failed");
+}
+
 function publicEndpoint(tunnel: Tunnel) {
   return tunnel.kind === "web" ? `https://${tunnel.hostname}` : `${tunnel.kind.toUpperCase()} :${tunnel.remote_port}`;
+}
+
+function hostnameSlug(hostname: string | null) {
+  return hostname?.split(".")[0] ?? "";
 }
 
 function countryFlag(code: string) {
@@ -88,10 +115,17 @@ function App() {
   const [snapshot, setSnapshot] = useState(defaultSnapshot);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [editingTunnel, setEditingTunnel] = useState<Tunnel | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Tunnel | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   const refresh = useCallback(async () => {
     if (!isTauri()) {
@@ -147,6 +181,10 @@ function App() {
     if (!deletingId) setPendingDelete(tunnel);
   }
 
+  function requestEdit(tunnel: Tunnel) {
+    if (!deletingId) setEditingTunnel(tunnel);
+  }
+
   async function confirmRemove() {
     const tunnel = pendingDelete;
     if (!tunnel || deletingId) return;
@@ -188,17 +226,17 @@ function App() {
 
         <section className="workspace">
           {view === "overview" && (
-            <Overview snapshot={snapshot} onlineCount={onlineCount} onOpenTunnels={() => setView("tunnels")} />
+            <Overview snapshot={snapshot} onlineCount={onlineCount} onOpenTunnels={() => setView("tunnels")} onNotice={setNotice} />
           )}
           {view === "tunnels" && (
-            <TunnelView tunnels={snapshot.tunnels} deletingId={deletingId} onCreate={() => setShowCreate(true)} onToggle={toggleTunnel} onDelete={requestRemove} />
+            <TunnelView tunnels={snapshot.tunnels} deletingId={deletingId} onCreate={() => { setEditingTunnel(null); setShowCreate(true); }} onToggle={toggleTunnel} onEdit={requestEdit} onDelete={requestRemove} onNotice={setNotice} />
           )}
           {view === "activity" && <ActivityView snapshot={snapshot} />}
           {view === "settings" && <SettingsView snapshot={snapshot} onReconnect={() => setShowConnect(true)} onNotice={setNotice} />}
         </section>
       </main>
 
-      {showCreate && <TunnelEditor onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} onNotice={setNotice} />}
+      {(showCreate || editingTunnel) && <TunnelEditor tunnel={editingTunnel} onClose={() => { setShowCreate(false); setEditingTunnel(null); }} onSaved={async () => { setShowCreate(false); setEditingTunnel(null); await refresh(); }} onNotice={setNotice} />}
       {showConnect && <ConnectPanel configured={snapshot.configured} serverUrl={snapshot.server_url ?? ""} onClose={() => snapshot.configured && setShowConnect(false)} onConnected={async () => { setShowConnect(false); await refresh(); }} onNotice={setNotice} />}
       {pendingDelete && <DeleteDialog tunnel={pendingDelete} busy={deletingId === pendingDelete.id} onCancel={() => { if (!deletingId) setPendingDelete(null); }} onConfirm={() => void confirmRemove()} />}
       {notice && <div className="toast" role="alert"><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="关闭"><X /></button></div>}
@@ -210,7 +248,7 @@ function NavButton({ active, label, icon, onClick }: { active: boolean; label: s
   return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span></button>;
 }
 
-function Overview({ snapshot, onlineCount, onOpenTunnels }: { snapshot: AppSnapshot; onlineCount: number; onOpenTunnels: () => void }) {
+function Overview({ snapshot, onlineCount, onOpenTunnels, onNotice }: { snapshot: AppSnapshot; onlineCount: number; onOpenTunnels: () => void; onNotice: (message: string) => void }) {
   const latest = snapshot.events.slice(0, 5);
   return <div className="view enter">
     <div className="hero-grid">
@@ -235,7 +273,7 @@ function Overview({ snapshot, onlineCount, onOpenTunnels }: { snapshot: AppSnaps
     <div className="overview-bottom">
       <div className="panel route-panel">
         <div className="panel-head"><div><p className="section-index">ACTIVE ROUTES</p><h2>隧道路径</h2></div><button className="text-button" onClick={onOpenTunnels}>管理全部 <ChevronRight /></button></div>
-        {snapshot.tunnels.length === 0 ? <EmptyCompact /> : snapshot.tunnels.slice(0, 4).map((tunnel) => <TunnelRow tunnel={tunnel} key={tunnel.id} compact />)}
+        {snapshot.tunnels.length === 0 ? <EmptyCompact /> : snapshot.tunnels.slice(0, 4).map((tunnel) => <TunnelRow tunnel={tunnel} key={tunnel.id} compact onNotice={onNotice} />)}
       </div>
       <div className="panel security-panel">
         <ShieldCheck />
@@ -252,24 +290,41 @@ function Metric({ label, value, note }: { label: string; value: string; note: st
   return <div className="metric"><span>{label}</span><strong>{value}</strong><code>{note}</code></div>;
 }
 
-function TunnelView({ tunnels, deletingId, onCreate, onToggle, onDelete }: { tunnels: Tunnel[]; deletingId: string | null; onCreate: () => void; onToggle: (t: Tunnel) => void; onDelete: (t: Tunnel) => void }) {
+function TunnelView({ tunnels, deletingId, onCreate, onToggle, onEdit, onDelete, onNotice }: { tunnels: Tunnel[]; deletingId: string | null; onCreate: () => void; onToggle: (t: Tunnel) => void; onEdit: (t: Tunnel) => void; onDelete: (t: Tunnel) => void; onNotice: (message: string) => void }) {
   return <div className="view enter">
     <div className="view-heading"><div><p className="section-index">02 / TCP TUNNELS</p><h1>隧道</h1><p>每个公网端口对应一个仅由本机访问的服务。</p></div><button className="primary" onClick={onCreate}><Plus /> 创建映射</button></div>
     <div className="tunnel-table panel">
       <div className="table-head"><span>状态 / 名称</span><span>本地目标</span><span>公网端点</span><span>访问策略</span><span /></div>
-      {tunnels.length === 0 ? <div className="large-empty"><Cable /><h2>尚无隧道</h2><p>创建第一条 TCP 映射，把 SSH、数据库或本地开发服务接入公网。</p><button className="secondary" onClick={onCreate}><Plus /> 创建第一条</button></div> : tunnels.map((tunnel) => <TunnelRow key={tunnel.id} tunnel={tunnel} deleting={deletingId === tunnel.id} onToggle={onToggle} onDelete={onDelete} />)}
+      {tunnels.length === 0 ? <div className="large-empty"><Cable /><h2>尚无隧道</h2><p>创建第一条 TCP 映射，把 SSH、数据库或本地开发服务接入公网。</p><button className="secondary" onClick={onCreate}><Plus /> 创建第一条</button></div> : tunnels.map((tunnel) => <TunnelRow key={tunnel.id} tunnel={tunnel} deleting={deletingId === tunnel.id} onToggle={onToggle} onEdit={onEdit} onDelete={onDelete} onNotice={onNotice} />)}
     </div>
   </div>;
 }
 
-function TunnelRow({ tunnel, compact, deleting, onToggle, onDelete }: { tunnel: Tunnel; compact?: boolean; deleting?: boolean; onToggle?: (t: Tunnel) => void; onDelete?: (t: Tunnel) => void }) {
+function TunnelRow({ tunnel, compact, deleting, onToggle, onEdit, onDelete, onNotice }: { tunnel: Tunnel; compact?: boolean; deleting?: boolean; onToggle?: (t: Tunnel) => void; onEdit?: (t: Tunnel) => void; onDelete?: (t: Tunnel) => void; onNotice?: (message: string) => void }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const stateLabel = ({ online: "运行中", stopped: "已停止", starting: "启动中", agent_offline: "设备离线", error: "端口异常" })[tunnel.status];
+  const endpoint = publicEndpoint(tunnel);
+
+  async function copyEndpoint() {
+    if (copyState === "copied") return;
+    try {
+      await copyText(endpoint);
+      setCopyState("copied");
+      onNotice?.("公网地址已复制");
+    } catch {
+      setCopyState("failed");
+      onNotice?.("复制公网地址失败，请手动选择地址");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1800);
+  }
+
+  const copyLabel = copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "复制公网地址";
   return <div className={`tunnel-row ${compact ? "compact" : ""}`}>
     <div className="tunnel-name"><span className={`tunnel-dot ${tunnel.status}`} /><div><strong>{tunnel.name}</strong><small>{stateLabel}</small></div></div>
     <code className="local-target" title={`${tunnel.local_host}:${tunnel.local_port}`}>{tunnel.local_host}:{tunnel.local_port}</code>
-    <code className="public-port" title={publicEndpoint(tunnel)}><span className="endpoint-label">{publicEndpoint(tunnel)}</span><Copy size={13} /></code>
+    <div className="public-port" title={endpoint}><code className="endpoint-label">{endpoint}</code><button type="button" className="copy-endpoint" onClick={() => void copyEndpoint()} aria-label={`${copyLabel}：${endpoint}`} title={copyLabel}>{copyState === "copied" ? <Check size={13} /> : <Copy size={13} />}</button></div>
     {!compact && <span className={`policy ${tunnel.access_mode}`}>{tunnel.access_mode === "allowlist" ? `${tunnel.allowed_cidrs.length} 条白名单` : "公开访问"}</span>}
-    {!compact && <div className="row-actions"><button type="button" className={`switch ${tunnel.enabled ? "on" : ""}`} role="switch" aria-checked={tunnel.enabled} onClick={() => onToggle?.(tunnel)}><span /></button><button type="button" className="ghost-danger" disabled={deleting} onClick={() => onDelete?.(tunnel)} aria-label={`删除 ${tunnel.name}`}><Trash2 /></button></div>}
+    {!compact && <div className="row-actions"><button type="button" className="ghost-edit" disabled={deleting} onClick={() => onEdit?.(tunnel)} aria-label={`编辑 ${tunnel.name}`} title="编辑隧道"><Pencil /></button><button type="button" className={`switch ${tunnel.enabled ? "on" : ""}`} role="switch" aria-checked={tunnel.enabled} disabled={deleting} onClick={() => onToggle?.(tunnel)}><span /></button><button type="button" className="ghost-danger" disabled={deleting} onClick={() => onDelete?.(tunnel)} aria-label={`删除 ${tunnel.name}`}><Trash2 /></button></div>}
   </div>;
 }
 
@@ -337,7 +392,7 @@ function SettingsView({ snapshot, onReconnect, onNotice }: { snapshot: AppSnapsh
       <div className="panel settings-card"><Server /><div><h2>中继服务器</h2><p>{snapshot.server_url ?? "尚未配置"}</p><small>设备令牌已存入 macOS 钥匙串，不会显示在界面中。</small></div><button className="secondary" onClick={onReconnect}>{snapshot.configured ? "重新配置" : "连接"}</button></div>
       <div className="panel settings-card"><Network /><div><h2>承载协议</h2><p>当前：{snapshot.active_transport?.toUpperCase() ?? "未连接"}</p><small>{snapshot.transport_fallback_reason ?? "自动模式优先 QUIC，失败后回退 WSS；KCP 需手动选择。"}</small></div><select value={snapshot.transport_mode ?? "auto"} onChange={(e)=>void changeTransport(e.target.value as TransportMode)}><option value="auto">自动</option><option value="quic">QUIC</option><option value="kcp">KCP</option><option value="wss">WSS</option></select></div>
       <div className="panel settings-card"><Power /><div><h2>登录时启动</h2><p>开机后在菜单栏运行 TunnelBridge</p><small>默认关闭，隧道只会在应用运行时保持连接。</small></div><button className={`switch ${autostart ? "on" : ""}`} role="switch" aria-checked={autostart} onClick={toggleAutostart}><span /></button></div>
-      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.2</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
+      <div className="panel settings-card"><RefreshCw /><div><h2>应用更新</h2><p>TunnelBridge 0.2.3</p><small>更新包经过独立签名与 Apple 公证。</small></div><button className="secondary" onClick={checkUpdate}>检查更新</button></div>
     </div>
   </div>;
 }
@@ -363,15 +418,20 @@ function ConnectPanel({ configured, serverUrl, onClose, onConnected, onNotice }:
   </form></div>;
 }
 
-function TunnelEditor({ onClose, onSaved, onNotice }: { onClose: () => void; onSaved: () => void; onNotice: (m: string) => void }) {
-  const [name, setName] = useState(""); const [host, setHost] = useState("127.0.0.1");
-  const [localPort, setLocalPort] = useState("22"); const [remotePort, setRemotePort] = useState("");
-  const [kind, setKind] = useState<TunnelKind>("tcp"); const [localScheme, setLocalScheme] = useState<LocalScheme>("tcp");
-  const [hostname, setHostname] = useState("");
-  const [mode, setMode] = useState<AccessMode>("allowlist"); const [cidrs, setCidrs] = useState("");
-  const [lanConfirmed, setLanConfirmed] = useState(false); const [publicConfirmed, setPublicConfirmed] = useState(false);
+function TunnelEditor({ tunnel, onClose, onSaved, onNotice }: { tunnel: Tunnel | null; onClose: () => void; onSaved: () => void; onNotice: (m: string) => void }) {
+  const editing = tunnel !== null;
+  const initialHost = tunnel?.local_host ?? "127.0.0.1";
+  const [name, setName] = useState(tunnel?.name ?? ""); const [host, setHost] = useState(initialHost);
+  const [localPort, setLocalPort] = useState(String(tunnel?.local_port ?? (tunnel?.kind === "web" ? 3000 : tunnel?.kind === "udp" ? 53 : 22)));
+  const [remotePort, setRemotePort] = useState(tunnel?.remote_port ? String(tunnel.remote_port) : "");
+  const [kind, setKind] = useState<TunnelKind>(tunnel?.kind ?? "tcp"); const [localScheme, setLocalScheme] = useState<LocalScheme>(tunnel?.local_scheme ?? "tcp");
+  const [hostname, setHostname] = useState(hostnameSlug(tunnel?.hostname ?? null));
+  const [mode, setMode] = useState<AccessMode>(tunnel?.access_mode ?? "allowlist"); const [cidrs, setCidrs] = useState(tunnel?.allowed_cidrs.join("\n") ?? "");
+  const [lanConfirmed, setLanConfirmed] = useState(Boolean(tunnel && !["localhost", "127.0.0.1", "::1"].includes(initialHost.trim())));
+  const [publicConfirmed, setPublicConfirmed] = useState(tunnel?.access_mode === "public");
   const [busy, setBusy] = useState(false);
   const isLoopback = ["localhost", "127.0.0.1", "::1"].includes(host.trim());
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (mode === "public" && !publicConfirmed) { onNotice("公开访问需要先确认风险"); return; }
@@ -381,15 +441,34 @@ function TunnelEditor({ onClose, onSaved, onNotice }: { onClose: () => void; onS
       const invalid = allowedCidrs.find((cidr) => { try { ipaddr.parseCIDR(cidr); return false; } catch { return true; } });
       if (invalid) { onNotice(`CIDR 格式无效：${invalid}`); return; }
     }
-    const request: CreateTunnelRequest = { name, local_host: host, local_port: Number(localPort), kind, local_scheme: localScheme, remote_port: kind !== "web" && remotePort ? Number(remotePort) : undefined, hostname: kind === "web" ? hostname : undefined, access_mode: mode, allowed_cidrs: allowedCidrs, enabled: true, allow_lan_target: !isLoopback && lanConfirmed };
-    setBusy(true); try { await command("create_tunnel", { request }); await onSaved(); } catch (error) { onNotice(String(error)); } finally { setBusy(false); }
+    const common = { name: name.trim(), local_host: host.trim(), local_port: Number(localPort), local_scheme: localScheme, remote_port: kind !== "web" && remotePort ? Number(remotePort) : undefined, hostname: kind === "web" ? hostname.trim().toLowerCase() : undefined, access_mode: mode, allowed_cidrs: allowedCidrs, allow_lan_target: !isLoopback && lanConfirmed };
+    setBusy(true);
+    try {
+      if (editing && tunnel) {
+        const update: UpdateTunnelRequest = common;
+        await command("update_tunnel", { id: tunnel.id, update });
+      } else {
+        const request: CreateTunnelRequest = { ...common, kind, enabled: true };
+        await command("create_tunnel", { request });
+      }
+      await onSaved();
+      onNotice(editing ? `隧道“${name.trim()}”已更新` : `隧道“${name.trim()}”已创建`);
+    } catch (error) { onNotice(String(error)); } finally { setBusy(false); }
   }
-  return <div className="drawer-backdrop"><form className="drawer" onSubmit={submit}><div className="drawer-head"><div><p className="section-index">NEW MULTI-PROTOCOL ROUTE</p><h1>创建隧道</h1></div><button type="button" className="modal-close" onClick={onClose}><X /></button></div>
-    <div className="form-grid"><label className="wide">代理类型<select value={kind} onChange={(e) => { const next=e.target.value as TunnelKind; setKind(next); setLocalScheme(next === "tcp" ? "tcp" : next === "udp" ? "udp" : "http"); setLocalPort(next === "web" ? "3000" : next === "udp" ? "53" : "22"); }}><option value="tcp">TCP</option><option value="udp">UDP</option><option value="web">HTTP / HTTPS</option></select></label><label className="wide">名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === "web" ? "本地 Web 应用" : "生产环境 SSH"} required maxLength={80} /></label><label>本地地址<input value={host} onChange={(e) => setHost(e.target.value)} required /></label><label>本地端口<input type="number" min="1" max="65535" value={localPort} onChange={(e) => setLocalPort(e.target.value)} required /></label>{kind === "web" ? <><label>本地协议<select value={localScheme} onChange={(e)=>setLocalScheme(e.target.value as LocalScheme)}><option value="http">HTTP</option><option value="https">HTTPS（严格校验证书）</option></select></label><label>公网子域名<input value={hostname} onChange={(e)=>setHostname(e.target.value.toLowerCase())} placeholder="myapp" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /></label></> : <label className="wide">远程端口 <small>留空自动分配</small><input type="number" min="1" max="65535" value={remotePort} onChange={(e) => setRemotePort(e.target.value)} placeholder="自动" /></label>}</div>
+
+  function changeKind(next: TunnelKind) {
+    setKind(next);
+    if (editing) return;
+    setLocalScheme(next === "tcp" ? "tcp" : next === "udp" ? "udp" : "http");
+    setLocalPort(next === "web" ? "3000" : next === "udp" ? "53" : "22");
+  }
+
+  return <div className="drawer-backdrop"><form className="drawer" onSubmit={submit}><div className="drawer-head"><div><p className="section-index">{editing ? "EDIT MULTI-PROTOCOL ROUTE" : "NEW MULTI-PROTOCOL ROUTE"}</p><h1>{editing ? "编辑隧道" : "创建隧道"}</h1></div><button type="button" className="modal-close" onClick={onClose} disabled={busy}><X /></button></div>
+    <div className="form-grid"><label className="wide">代理类型{editing && <small>创建后不可更改</small>}<select value={kind} disabled={editing} onChange={(e) => changeKind(e.target.value as TunnelKind)}><option value="tcp">TCP</option><option value="udp">UDP</option><option value="web">HTTP / HTTPS</option></select></label><label className="wide">名称<input value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === "web" ? "本地 Web 应用" : "生产环境 SSH"} required maxLength={80} /></label><label>本地地址<input value={host} onChange={(e) => { setHost(e.target.value); setLanConfirmed(false); }} required /></label><label>本地端口<input type="number" min="1" max="65535" value={localPort} onChange={(e) => setLocalPort(e.target.value)} required /></label>{kind === "web" ? <><label>本地协议<select value={localScheme} onChange={(e)=>setLocalScheme(e.target.value as LocalScheme)}><option value="http">HTTP</option><option value="https">HTTPS（严格校验证书）</option></select></label><label>公网子域名<input value={hostname} onChange={(e)=>setHostname(e.target.value.toLowerCase())} placeholder="myapp" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /></label></> : <label className="wide">远程端口 <small>{editing ? "修改后原端口会释放" : "留空自动分配"}</small><input type="number" min="1" max="65535" value={remotePort} onChange={(e) => setRemotePort(e.target.value)} placeholder="自动" /></label>}</div>
     {!isLoopback && <label className="confirm"><input type="checkbox" checked={lanConfirmed} onChange={(e) => setLanConfirmed(e.target.checked)} /><span><strong>允许访问局域网目标</strong>客户端将能连接到这台 Mac 可访问的远程主机。</span></label>}
     <fieldset><legend>公网访问策略</legend><button type="button" className={`mode-card ${mode === "allowlist" ? "selected" : ""}`} onClick={() => setMode("allowlist")}><ShieldCheck /><span><strong>IP 白名单</strong><small>仅允许指定来源网络</small></span></button><button type="button" className={`mode-card danger ${mode === "public" ? "selected" : ""}`} onClick={() => setMode("public")}><Network /><span><strong>公开访问</strong><small>允许任意来源建立连接</small></span></button></fieldset>
     {mode === "allowlist" ? <label>允许的 CIDR<textarea value={cidrs} onChange={(e) => setCidrs(e.target.value)} placeholder={"203.0.113.8/32\n2001:db8::/48"} required /></label> : <label className="confirm danger"><input type="checkbox" checked={publicConfirmed} onChange={(e) => setPublicConfirmed(e.target.checked)} /><span><strong>我了解公开暴露的风险</strong>目标服务必须配置可靠的身份认证。</span></label>}
-    <div className="drawer-footer"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={busy}>{busy ? "正在创建…" : "创建并启动"}</button></div>
+    <div className="drawer-footer"><button type="button" className="secondary" onClick={onClose} disabled={busy}>取消</button><button className="primary" disabled={busy}>{busy ? (editing ? "正在保存…" : "正在创建…") : (editing ? "保存修改" : "创建并启动")}</button></div>
   </form></div>;
 }
 
