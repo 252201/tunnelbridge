@@ -48,8 +48,8 @@ main { grid-column: 2; min-width: 0; }
 .signal.connecting { background: var(--amber); animation: pulse 1s infinite; }
 .signal.error, .signal.offline { background: var(--danger); }
 .top-actions { display: flex; gap: 10px; align-items: center; }
-.icon-button, .modal-close, .ghost-danger { border: 1px solid var(--line); background: #151916; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; cursor: pointer; }
-.icon-button svg, .modal-close svg, .ghost-danger svg { width: 16px; }
+.icon-button, .modal-close, .ghost-danger, .ghost-edit { border: 1px solid var(--line); background: #151916; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; cursor: pointer; }
+.icon-button svg, .modal-close svg, .ghost-danger svg, .ghost-edit svg { width: 16px; }
 
 .primary, .secondary { min-height: 42px; border-radius: 8px; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; font-weight: 600; border: 1px solid transparent; }
 .primary { background: var(--green); color: #10140d; box-shadow: 0 8px 30px rgba(185,242,39,.08); }
@@ -104,7 +104,7 @@ h1 em { font-style: normal; color: #899289; }
 .view-heading h1 { margin: 7px 0 10px; font-size: 52px; }
 .view-heading > div > p:last-child { color: var(--muted); margin: 0; }
 .tunnel-table { overflow: hidden; }
-.table-head, .tunnel-row { display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(145px, .9fr) minmax(0, 1.45fr) minmax(112px, .8fr) 92px; align-items: center; column-gap: 14px; }
+.table-head, .tunnel-row { display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(145px, .9fr) minmax(0, 1.45fr) minmax(112px, .8fr) 132px; align-items: center; column-gap: 14px; }
 .table-head { min-height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); color: #667068; font: 10px "IBM Plex Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .tunnel-row { min-height: 72px; padding: 0 20px; border-bottom: 1px solid var(--line); }
 .tunnel-row:last-child { border-bottom: 0; }
@@ -120,11 +120,18 @@ h1 em { font-style: normal; color: #899289; }
 .tunnel-row > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tunnel-row code { color: #abb3aa; font: 12px "IBM Plex Mono", monospace; }
 .public-port { min-width: 0; max-width: 100%; color: var(--cyan) !important; display: flex; align-items: center; gap: 7px; }
+.public-port .endpoint-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cyan); font: 12px "IBM Plex Mono", monospace; }
 .endpoint-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy-endpoint { flex: 0 0 auto; display: grid; place-items: center; padding: 2px; border: 0; border-radius: 4px; color: var(--cyan); background: transparent; cursor: pointer; }
+.copy-endpoint:hover, .copy-endpoint:focus-visible { color: #b5fff1; background: rgba(95,226,209,.12); outline: none; }
+.copy-endpoint:active { background: rgba(95,226,209,.2); }
 .public-port svg { flex: 0 0 auto; }
 .policy { justify-self: start; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border: 1px solid rgba(95,226,209,.14); color: var(--cyan); border-radius: 5px; font-size: 11px; }
 .policy.public { color: var(--amber); border-color: rgba(246,185,87,.18); }
 .row-actions { display: flex; align-items: center; justify-content: end; gap: 8px; }
+.ghost-edit { opacity: .72; border: 0; background: transparent; }
+.ghost-edit:hover { opacity: 1; color: var(--cyan); }
+.ghost-edit:disabled { opacity: .3; cursor: wait; }
 .switch { width: 39px; height: 22px; padding: 2px; border-radius: 12px; background: #282e29; border: 1px solid #3a423b; cursor: pointer; transition: .2s; }
 .switch span { display: block; width: 16px; height: 16px; background: #828b82; border-radius: 50%; transition: .2s; }
 .switch.on { background: rgba(185,242,39,.18); border-color: rgba(185,242,39,.45); }

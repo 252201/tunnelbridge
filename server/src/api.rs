@@ -45,6 +45,10 @@ pub fn router(state: SharedState) -> Router {
             get(list_devices).post(create_device),
         )
         .route("/api/v1/admin/devices/{id}", delete(revoke_device))
+        .route(
+            "/api/v1/admin/devices/{id}/permanent",
+            delete(delete_device_permanently),
+        )
         .route("/api/v1/admin/tunnels", get(admin_list_tunnels))
         .route(
             "/api/v1/admin/tunnels/{id}",
@@ -268,6 +272,65 @@ async fn revoke_device(
         "device.revoke",
         &id.to_string(),
         &format!("revoked by {username}"),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_device_permanently(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let (username, _) = require_admin(&state, &headers, &Method::DELETE)?;
+    let device_id = id.to_string();
+    let device = sqlx::query("SELECT revoked FROM devices WHERE id = ?")
+        .bind(&device_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !device.get::<bool, _>("revoked") {
+        return Err(AppError::BadRequest("请先撤销设备，再永久删除".into()));
+    }
+
+    let tunnel_rows = sqlx::query("SELECT id FROM tunnels WHERE agent_id = ?")
+        .bind(&device_id)
+        .fetch_all(&state.db)
+        .await?;
+    let tunnel_ids = tunnel_rows
+        .into_iter()
+        .map(|row| {
+            Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|error| AppError::Internal(error.into()))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("DELETE FROM tunnels WHERE agent_id = ?")
+        .bind(&device_id)
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query("DELETE FROM devices WHERE id = ?")
+        .bind(&device_id)
+        .execute(&mut *transaction)
+        .await?;
+    if result.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Err(AppError::NotFound);
+    }
+    transaction.commit().await?;
+
+    for tunnel_id in tunnel_ids {
+        gateway::stop_listener(&state, tunnel_id);
+    }
+    if let Some((_, peer)) = state.agents.remove(&id) {
+        peer.cancellation.cancel();
+    }
+    audit(
+        &state,
+        "device.delete",
+        &device_id,
+        &format!("permanently deleted by {username}"),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
